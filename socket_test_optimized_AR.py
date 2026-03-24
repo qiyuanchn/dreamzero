@@ -79,6 +79,8 @@ class ARDroidRoboarenaPolicy:
         # Video across time for saving (similar to original server)
         self.video_across_time = []
         self._msg_index = 0
+        self._save_video_on_reset = os.getenv("DREAMZERO_SAVE_RESET_VIDEO", "1").lower() in {"1", "true", "yes", "on"}
+        logger.info("Reset video saving enabled: %s", self._save_video_on_reset)
         
         # Create output directory if specified
         if self._output_dir:
@@ -187,16 +189,25 @@ class ARDroidRoboarenaPolicy:
         """
         joint_action = None
         gripper_action = None
+        action_shapes = {}
         
         # Extract actions from dict
         for key, value in action_dict.items():
+            shape = tuple(value.shape) if hasattr(value, "shape") else None
+            action_shapes[key] = shape
             if "joint_position" in key:
                 joint_action = value
             elif "gripper_position" in key or "gripper" in key:
                 gripper_action = value
+
+        logger.info(
+            "Action dict keys from model: %s",
+            {key: action_shapes[key] for key in sorted(action_shapes)},
+        )
         
         if joint_action is None:
             # Fallback: return zeros
+            logger.warning("No joint_position key found in action_dict; returning zeros with shape (1, 8)")
             return np.zeros((1, 8), dtype=np.float32)
         
         # Convert to numpy if tensor
@@ -219,10 +230,15 @@ class ARDroidRoboarenaPolicy:
             elif gripper_action.ndim == 0:
                 gripper_action = gripper_action.reshape(1, 1)
         else:
+            logger.info(
+                "No gripper action key found in action_dict; appending a zero gripper column to convert joint action from shape %s to 8D output",
+                tuple(joint_action.shape),
+            )
             gripper_action = np.zeros((N, 1), dtype=np.float32)
         
         # Concatenate: (N, 7) + (N, 1) -> (N, 8)
         action = np.concatenate([joint_action, gripper_action], axis=-1).astype(np.float32)
+        logger.info("Converted roboarena action shape: %s", tuple(action.shape))
         
         return action
     
@@ -349,13 +365,15 @@ class ARDroidRoboarenaPolicy:
         self._call_count = 0
         self._is_first_call = True
         self.video_across_time = []
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
     
     def reset(self, reset_info: dict) -> None:
         """Reset the policy state for a new episode.
         
         Clears frame buffers and resets call count.
         """
-        self._reset_state(save_video=True)
+        self._reset_state(save_video=self._save_video_on_reset)
 
 
 class WebsocketPolicyServer:
