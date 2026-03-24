@@ -21,7 +21,8 @@ from huggingface_hub import hf_hub_download
 
 logger = logging.getLogger(__name__)
 
-WAN_HF_REPO_ID = os.getenv("WAN_HF_REPO_ID", "alibaba-pai/Wan2.1-Fun-V1.1-1.3B-InP")
+WAN14_HF_REPO_ID = os.getenv("WAN14_HF_REPO_ID", "Wan-AI/Wan2.1-I2V-14B-480P")
+WAN13_HF_REPO_ID = os.getenv("WAN13_HF_REPO_ID", "alibaba-pai/Wan2.1-Fun-V1.1-1.3B-InP")
 WAN22_HF_REPO_ID = os.getenv("WAN22_HF_REPO_ID", "Wan-AI/Wan2.2-TI2V-5B")
 
 
@@ -33,7 +34,11 @@ def _find_repo_root() -> Path:
 
 
 def _local_model_dir_for_repo(repo_id: str) -> Path:
-    env_var = "WAN_LOCAL_MODEL_DIR" if repo_id == WAN_HF_REPO_ID else "WAN22_LOCAL_MODEL_DIR"
+    env_var = {
+        WAN14_HF_REPO_ID: "WAN14_LOCAL_MODEL_DIR",
+        WAN13_HF_REPO_ID: "WAN13_LOCAL_MODEL_DIR",
+        WAN22_HF_REPO_ID: "WAN22_LOCAL_MODEL_DIR",
+    }.get(repo_id, "WAN_LOCAL_MODEL_DIR")
     return Path(
         os.getenv(
             env_var,
@@ -42,13 +47,17 @@ def _local_model_dir_for_repo(repo_id: str) -> Path:
     )
 
 
-def hf_download(filename: str, repo_id: str = WAN_HF_REPO_ID) -> str:
+def _resolve_wan21_repo_id(model) -> str:
+    return WAN13_HF_REPO_ID if getattr(model, "dim", None) == 1536 else WAN14_HF_REPO_ID
+
+
+def hf_download(filename: str, repo_id: str = WAN14_HF_REPO_ID) -> str:
     """Download a file from the specified HuggingFace repo to HF cache."""
     path = hf_hub_download(repo_id=repo_id, filename=filename)
     return path
 
 
-def ensure_file(path: str | None, hf_filename: str, repo_id: str = WAN_HF_REPO_ID) -> str:
+def ensure_file(path: str | None, hf_filename: str, repo_id: str = WAN14_HF_REPO_ID) -> str:
     """Prefer an explicit path, then the local checkpoints snapshot, then Hugging Face."""
     if path is not None and os.path.exists(path):
         return path
@@ -58,7 +67,7 @@ def ensure_file(path: str | None, hf_filename: str, repo_id: str = WAN_HF_REPO_I
     return hf_download(hf_filename, repo_id)
 
 
-def ensure_dir(path: str | None, *hf_filenames: str, repo_id: str = WAN_HF_REPO_ID) -> str | None:
+def ensure_dir(path: str | None, *hf_filenames: str, repo_id: str = WAN14_HF_REPO_ID) -> str | None:
     """Prefer an explicit directory, then the local checkpoints snapshot."""
     if path is not None and os.path.isdir(path):
         return path
@@ -270,21 +279,25 @@ class WANPolicyHead(ActionHead):
         self.action_horizon = config.action_horizon
         self.num_inference_timesteps = config.num_inference_timesteps
         
+        wan21_repo_id = _resolve_wan21_repo_id(self.model)
+
         text_enc_path = ensure_file(
             self.text_encoder.text_encoder_pretrained_path,
             "models_t5_umt5-xxl-enc-bf16.pth",
+            repo_id=wan21_repo_id,
         )
         self.text_encoder.load_state_dict(torch.load(text_enc_path, map_location='cpu'))
 
         img_enc_path = ensure_file(
             self.image_encoder.image_encoder_pretrained_path,
             "models_clip_open-clip-xlm-roberta-large-vit-huge-14.pth",
+            repo_id=wan21_repo_id,
         )
         self.image_encoder.model.load_state_dict(torch.load(img_enc_path, map_location='cpu'), strict=False)
 
-        # Wan2.2 (WanVideoVAE38, z_dim=48) uses Wan2.2_VAE.pth; Wan2.1 uses Wan2.1_VAE.pth
+        # Wan2.2 (WanVideoVAE38, z_dim=48) uses Wan2.2_VAE.pth; Wan2.1 chooses 14B vs 1.3B by DiT dim.
         vae_hf_filename = "Wan2.2_VAE.pth" if getattr(self.vae, "z_dim", 16) == 48 else "Wan2.1_VAE.pth"
-        vae_repo_id = WAN22_HF_REPO_ID if getattr(self.vae, "z_dim", 16) == 48 else WAN_HF_REPO_ID
+        vae_repo_id = WAN22_HF_REPO_ID if getattr(self.vae, "z_dim", 16) == 48 else wan21_repo_id
         vae_path = ensure_file(
             self.vae.vae_pretrained_path,
             vae_hf_filename,
@@ -293,7 +306,7 @@ class WANPolicyHead(ActionHead):
         self.vae.model.load_state_dict(torch.load(vae_path, map_location='cpu'))
 
         if not config.skip_component_loading:
-            dit_repo_id = WAN22_HF_REPO_ID if getattr(self.model, "in_dim", 16) == 48 else WAN_HF_REPO_ID
+            dit_repo_id = WAN22_HF_REPO_ID if getattr(self.model, "in_dim", 16) == 48 else wan21_repo_id
             dit_dir = ensure_dir(
                 self.model.diffusion_model_pretrained_path,
                 "diffusion_pytorch_model.safetensors.index.json",

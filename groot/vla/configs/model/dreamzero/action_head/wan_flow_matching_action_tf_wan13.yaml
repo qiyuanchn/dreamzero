@@ -1,0 +1,29 @@
+# @package _global_
+# Wan2.1-Fun-V1.1-1.3B backbone config for DreamZero
+# Use with override: model/dreamzero/action_head=wan_flow_matching_action_tf_wan13
+
+defaults:
+  - wan_flow_matching_action_tf
+
+# 1.3B specific overrides
+# Keep frame_seqlen consistent with your data/transform settings.
+# For current DreamZero defaults this remains 880.
+
+action_head_cfg:
+  config:
+    diffusion_model_cfg:
+      model_type: "i2v"
+      dim: 1536
+      in_dim: 36
+      ffn_dim: 8960
+      out_dim: 16
+      freq_dim: 256
+      eps: 1e-6
+      num_heads: 12
+      num_layers: 30
+
+# Optional local checkpoint paths (recommend passing from train scripts/env)
+# dit_version: /path/to/Wan2.1-Fun-V1.1-1.3B-InP
+# text_encoder_pretrained_path: /path/to/Wan2.1-Fun-V1.1-1.3B-InP/models_t5_umt5-xxl-enc-bf16.pth
+# image_encoder_pretrained_path: /path/to/Wan2.1-Fun-V1.1-1.3B-InP/models_clip_open-clip-xlm-roberta-large-vit-huge-14.pth
+# vae_pretrained_path: /path/to/Wan2.1-Fun-V1.1-1.3B-InP/Wan2.1_VAE.pth

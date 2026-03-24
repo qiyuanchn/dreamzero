@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 import random
 from typing import Any, Dict, List, Optional
 
@@ -22,6 +23,23 @@ from groot.vla.data.schema import (
 )
 from groot.vla.data.transform.base import InvertibleModalityTransform
 from groot.vla.model.dreamzero.transform.common import formalize_language
+
+
+def _find_repo_root() -> Path:
+    for parent in Path(__file__).resolve().parents:
+        if (parent / "pyproject.toml").exists():
+            return parent
+    return Path(__file__).resolve().parents[5]
+
+
+def _default_tokenizer_path() -> str:
+    env_path = os.getenv("TOKENIZER_PATH")
+    if env_path:
+        return env_path
+    local_path = _find_repo_root() / "checkpoints" / "umt5-xxl"
+    if local_path.is_dir():
+        return str(local_path)
+    return "google/umt5-xxl"
 
 
 def basic_clean(text):
@@ -166,7 +184,7 @@ def collate(features: List[dict], tokenizer: AutoTokenizer, num_views=3, embodim
 
 
 class DefaultDataCollator(DataCollatorMixin):
-    def __init__(self, tokenizer_path: str="/home/zqy/ws/dreamzero/checkpoints/umt5-xxl", max_length: int=512, num_views: int=1, embodiment_tag_mapping=None):
+    def __init__(self, tokenizer_path: str=_default_tokenizer_path(), max_length: int=512, num_views: int=1, embodiment_tag_mapping=None):
         super().__init__()
         self.tokenizer = HuggingfaceTokenizer(name=tokenizer_path, seq_len=max_length, clean='whitespace')
         self.num_views = num_views
@@ -218,7 +236,7 @@ class DreamTransform(InvertibleModalityTransform):
 
     # Add tokenizer attribute
     tokenizer_path: str = Field(
-        default="/home/zqy/ws/dreamzero/checkpoints/umt5-xxl",
+        default=_default_tokenizer_path(),
         description="Path to the tokenizer."
     )
     _tokenizer: Optional[HuggingfaceTokenizer] = PrivateAttr(default=None)
