@@ -68,11 +68,16 @@ def ensure_file(path: str | None, hf_filename: str, repo_id: str = WAN14_HF_REPO
 
 
 def ensure_dir(path: str | None, *hf_filenames: str, repo_id: str = WAN14_HF_REPO_ID) -> str | None:
-    """Prefer an explicit directory, then the local checkpoints snapshot."""
+    """Prefer an explicit directory, then the local checkpoints snapshot.
+
+    A directory is considered usable only if all requested files are present.
+    This avoids returning a partially-downloaded snapshot directory and failing
+    later with FileNotFoundError when sharded weights are loaded.
+    """
     if path is not None and os.path.isdir(path):
         return path
     local_dir = _local_model_dir_for_repo(repo_id)
-    if local_dir.is_dir() and any((local_dir / filename).exists() for filename in hf_filenames):
+    if local_dir.is_dir() and all((local_dir / filename).exists() for filename in hf_filenames):
         return str(local_dir)
     return None
 

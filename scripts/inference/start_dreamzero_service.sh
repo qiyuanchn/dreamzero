@@ -43,6 +43,11 @@ echo "  Save reset video: $DREAMZERO_SAVE_RESET_VIDEO"
 
 screen -S "$SCREEN_SESSION" -X select . >/dev/null 2>&1 || screen -dmS "$SCREEN_SESSION"
 
+PYTHON_CMD="python -m torch.distributed.run --standalone --nproc_per_node=$NUM_GPUS socket_test_optimized_AR.py --port $PORT --timeout-seconds $TIMEOUT_SECONDS --model-path $MODEL_PATH"
+if [[ "$ENABLE_DIT_CACHE" == "1" ]]; then
+  PYTHON_CMD+=" --enable-dit-cache"
+fi
+
 SCREEN_CMD=$(cat <<EOF
 source /home/zqy/miniconda3/etc/profile.d/conda.sh
 conda activate $CONDA_ENV
@@ -51,13 +56,9 @@ export PYTHONPATH=$ROOT_DIR
 export CUDA_VISIBLE_DEVICES=$CUDA_DEVICES
 export PYTORCH_CUDA_ALLOC_CONF=$PYTORCH_ALLOC
 export DREAMZERO_SAVE_RESET_VIDEO=$DREAMZERO_SAVE_RESET_VIDEO
-python -m torch.distributed.run --standalone --nproc_per_node=$NUM_GPUS socket_test_optimized_AR.py --port $PORT --timeout-seconds $TIMEOUT_SECONDS --model-path $MODEL_PATH
+$PYTHON_CMD
 EOF
 )
-
-if [[ "$ENABLE_DIT_CACHE" == "1" ]]; then
-  SCREEN_CMD+=" --enable-dit-cache"
-fi
 SCREEN_CMD+=" 2>&1 | tee $LOG_FILE; exec bash"
 
 screen -S "$SCREEN_SESSION" -X screen -t "$SCREEN_WINDOW" bash -lc "$SCREEN_CMD"
