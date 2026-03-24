@@ -1,6 +1,7 @@
 from dataclasses import dataclass, field
 import logging
 import time
+from pathlib import Path
 from typing import TypeAlias, cast
 import os
 
@@ -20,8 +21,25 @@ from huggingface_hub import hf_hub_download
 
 logger = logging.getLogger(__name__)
 
-WAN_HF_REPO_ID = "Wan-AI/Wan2.1-I2V-14B-480P"
-WAN22_HF_REPO_ID = "Wan-AI/Wan2.2-TI2V-5B"
+WAN_HF_REPO_ID = os.getenv("WAN_HF_REPO_ID", "alibaba-pai/Wan2.1-Fun-V1.1-1.3B-InP")
+WAN22_HF_REPO_ID = os.getenv("WAN22_HF_REPO_ID", "Wan-AI/Wan2.2-TI2V-5B")
+
+
+def _find_repo_root() -> Path:
+    for parent in Path(__file__).resolve().parents:
+        if (parent / "pyproject.toml").exists():
+            return parent
+    return Path(__file__).resolve().parents[5]
+
+
+def _local_model_dir_for_repo(repo_id: str) -> Path:
+    env_var = "WAN_LOCAL_MODEL_DIR" if repo_id == WAN_HF_REPO_ID else "WAN22_LOCAL_MODEL_DIR"
+    return Path(
+        os.getenv(
+            env_var,
+            str(_find_repo_root() / "checkpoints" / repo_id.split("/")[-1]),
+        )
+    )
 
 
 def hf_download(filename: str, repo_id: str = WAN_HF_REPO_ID) -> str:
@@ -31,10 +49,23 @@ def hf_download(filename: str, repo_id: str = WAN_HF_REPO_ID) -> str:
 
 
 def ensure_file(path: str | None, hf_filename: str, repo_id: str = WAN_HF_REPO_ID) -> str:
-    """Return a valid local path: use `path` if it exists, otherwise download from HuggingFace."""
+    """Prefer an explicit path, then the local checkpoints snapshot, then Hugging Face."""
     if path is not None and os.path.exists(path):
         return path
+    local_path = _local_model_dir_for_repo(repo_id) / hf_filename
+    if local_path.exists():
+        return str(local_path)
     return hf_download(hf_filename, repo_id)
+
+
+def ensure_dir(path: str | None, *hf_filenames: str, repo_id: str = WAN_HF_REPO_ID) -> str | None:
+    """Prefer an explicit directory, then the local checkpoints snapshot."""
+    if path is not None and os.path.isdir(path):
+        return path
+    local_dir = _local_model_dir_for_repo(repo_id)
+    if local_dir.is_dir() and any((local_dir / filename).exists() for filename in hf_filenames):
+        return str(local_dir)
+    return None
 
 from torch.distributions import Beta
 import torch.distributed as dist
@@ -262,16 +293,24 @@ class WANPolicyHead(ActionHead):
         self.vae.model.load_state_dict(torch.load(vae_path, map_location='cpu'))
 
         if not config.skip_component_loading:
-            dit_dir = self.model.diffusion_model_pretrained_path
-            # Wan2.2 (in_dim=48) uses Wan2.2-TI2V-5B repo; Wan2.1 uses Wan2.1-I2V-14B-480P
             dit_repo_id = WAN22_HF_REPO_ID if getattr(self.model, "in_dim", 16) == 48 else WAN_HF_REPO_ID
-            if dit_dir is None or not os.path.isdir(dit_dir):
-                index_path = hf_hub_download(repo_id=dit_repo_id, filename="diffusion_pytorch_model.safetensors.index.json")
-                dit_dir = os.path.dirname(index_path)
-                with open(index_path, 'r') as f:
-                    index = json.load(f)
-                for shard_file in set(index["weight_map"].values()):
-                    hf_hub_download(repo_id=dit_repo_id, filename=shard_file)
+            dit_dir = ensure_dir(
+                self.model.diffusion_model_pretrained_path,
+                "diffusion_pytorch_model.safetensors.index.json",
+                "diffusion_pytorch_model.safetensors",
+                repo_id=dit_repo_id,
+            )
+            if dit_dir is None:
+                try:
+                    index_path = hf_download("diffusion_pytorch_model.safetensors.index.json", repo_id=dit_repo_id)
+                    dit_dir = os.path.dirname(index_path)
+                    with open(index_path, 'r') as f:
+                        index = json.load(f)
+                    for shard_file in set(index["weight_map"].values()):
+                        hf_download(shard_file, repo_id=dit_repo_id)
+                except Exception:
+                    dit_path = hf_download("diffusion_pytorch_model.safetensors", repo_id=dit_repo_id)
+                    dit_dir = os.path.dirname(dit_path)
 
             if dit_dir is not None:
                 safetensors_path = os.path.join(dit_dir, "diffusion_pytorch_model.safetensors")
@@ -517,13 +556,14 @@ class WANPolicyHead(ActionHead):
         head_dim = self.model.dim // num_heads
         crossattn_cache: KVCacheType = []
         crossattn_cache_neg: KVCacheType = []
+        text_len = getattr(self.model, "text_len", 512)
 
         for _ in range(self.model.num_layers):
             crossattn_cache.append(
-                torch.zeros([2, batch_size, 512, num_heads, head_dim], dtype=dtype, device=device),
+                torch.zeros([2, batch_size, text_len, num_heads, head_dim], dtype=dtype, device=device),
             )
             crossattn_cache_neg.append(
-                torch.zeros([2, batch_size, 512, num_heads, head_dim], dtype=dtype, device=device),
+                torch.zeros([2, batch_size, text_len, num_heads, head_dim], dtype=dtype, device=device),
             )
 
         return crossattn_cache, crossattn_cache_neg
@@ -1381,7 +1421,11 @@ class WANPolicyHead(ActionHead):
             print(f"Loading TRT engine from {LOAD_TRT_ENGINE}")
             import groot.control.tensorrt_utils as trt_utils
             model_path = LOAD_TRT_ENGINE
-            self.trt_engine = trt_utils.load_tensorrt_engine(model_path, model_type="ar_14B")
+            trt_model_type = os.getenv(
+                "TRT_MODEL_TYPE",
+                "ar_14B" if self.model.num_heads == 40 else "ar_1.3B",
+            )
+            self.trt_engine = trt_utils.load_tensorrt_engine(model_path, model_type=trt_model_type)
 
     def parallelize(self, device_mesh: DeviceMesh) -> None:
         ip_mesh = device_mesh["ip"]

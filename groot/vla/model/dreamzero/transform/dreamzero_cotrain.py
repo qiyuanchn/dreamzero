@@ -166,7 +166,7 @@ def collate(features: List[dict], tokenizer: AutoTokenizer, num_views=3, embodim
 
 
 class DefaultDataCollator(DataCollatorMixin):
-    def __init__(self, tokenizer_path: str="google/umt5-xxl", max_length: int=512, num_views: int=1, embodiment_tag_mapping=None):
+    def __init__(self, tokenizer_path: str="/home/zqy/ws/dreamzero/checkpoints/umt5-xxl", max_length: int=512, num_views: int=1, embodiment_tag_mapping=None):
         super().__init__()
         self.tokenizer = HuggingfaceTokenizer(name=tokenizer_path, seq_len=max_length, clean='whitespace')
         self.num_views = num_views
@@ -218,7 +218,7 @@ class DreamTransform(InvertibleModalityTransform):
 
     # Add tokenizer attribute
     tokenizer_path: str = Field(
-        default="google/umt5-xxl",
+        default="/home/zqy/ws/dreamzero/checkpoints/umt5-xxl",
         description="Path to the tokenizer."
     )
     _tokenizer: Optional[HuggingfaceTokenizer] = PrivateAttr(default=None)

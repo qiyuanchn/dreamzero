@@ -18,6 +18,81 @@ ERROR_MSG = "Error: unexpected input/output"
 N_COLOR_CHANNELS = 3
 
 
+def _preview_items(items: list[str], limit: int = 8) -> str:
+    if not items:
+        return ""
+    preview = ", ".join(items[:limit])
+    if len(items) > limit:
+        preview += f", ... (+{len(items) - limit} more)"
+    return preview
+
+
+def _preview_mismatched_shapes(
+    mismatched_shapes: dict[str, tuple[tuple[int, ...], tuple[int, ...]]],
+    limit: int = 5,
+) -> str:
+    if not mismatched_shapes:
+        return ""
+    items = sorted(mismatched_shapes.items())
+    preview = ", ".join(
+        f"{key}: ckpt{ckpt_shape} != model{model_shape}"
+        for key, (ckpt_shape, model_shape) in items[:limit]
+    )
+    if len(items) > limit:
+        preview += f", ... (+{len(items) - limit} more)"
+    return preview
+
+
+def _filter_state_dict_for_module(
+    module: torch.nn.Module, state_dict: dict[str, torch.Tensor]
+) -> tuple[dict[str, torch.Tensor], list[str], dict[str, tuple[tuple[int, ...], tuple[int, ...]]]]:
+    model_state = module.state_dict()
+    filtered_state_dict: dict[str, torch.Tensor] = {}
+    unexpected_keys: list[str] = []
+    mismatched_shapes: dict[str, tuple[tuple[int, ...], tuple[int, ...]]] = {}
+
+    for key, value in state_dict.items():
+        if key not in model_state:
+            unexpected_keys.append(key)
+            continue
+        if tuple(model_state[key].shape) != tuple(value.shape):
+            mismatched_shapes[key] = (tuple(value.shape), tuple(model_state[key].shape))
+            continue
+        filtered_state_dict[key] = value
+
+    return filtered_state_dict, unexpected_keys, mismatched_shapes
+
+
+def _load_filtered_state_dict(
+    module: torch.nn.Module,
+    state_dict: dict[str, torch.Tensor],
+    label: str,
+) -> tuple[list[str], list[str], set[str], set[str], dict[str, tuple[tuple[int, ...], tuple[int, ...]]]]:
+    filtered_state_dict, filtered_unexpected_keys, mismatched_shapes = _filter_state_dict_for_module(module, state_dict)
+
+    if filtered_unexpected_keys:
+        print(
+            f"Skipping {len(filtered_unexpected_keys)} unexpected keys while loading {label}: "
+            f"{_preview_items(sorted(filtered_unexpected_keys))}"
+        )
+    if mismatched_shapes:
+        print(
+            f"Skipping {len(mismatched_shapes)} shape-mismatched keys while loading {label}: "
+            f"{_preview_mismatched_shapes(mismatched_shapes)}"
+        )
+
+    missing_keys, unexpected_keys = module.load_state_dict(filtered_state_dict, strict=False)
+    return (
+        missing_keys,
+        unexpected_keys,
+        set(filtered_state_dict.keys()),
+        set(filtered_unexpected_keys),
+        mismatched_shapes,
+    )
+
+
+
+
 @dataclass
 class VLAConfig(PretrainedConfig):
     model_type = "vla"
@@ -285,37 +360,71 @@ class VLA(PreTrainedModel):
         if os.path.exists(safetensors_index_path):
             with open(safetensors_index_path, 'r') as f:
                 index = json.load(f)
-            missing_keys_accum = set()
-            unexpected_keys_accum = set()
+            loaded_keys_accum = set()
+            load_unexpected_keys_accum = set()
+            filtered_unexpected_keys_accum = set()
+            mismatched_shapes_accum = {}
             shard_files = sorted(set(index["weight_map"].values()))
             for shard_file in shard_files:
                 shard_path = os.path.join(pretrained_model_name_or_path, shard_file)
                 print(f"Loading shard: {shard_path}")
                 shard_state_dict = load_file(shard_path)
-                missing_keys, unexpected_keys = model.load_state_dict(shard_state_dict, strict=False)
-                if missing_keys:
-                    missing_keys_accum.update(missing_keys)
-                if unexpected_keys:
-                    unexpected_keys_accum.update(unexpected_keys)
+                (
+                    _missing_keys,
+                    unexpected_keys,
+                    loaded_keys,
+                    filtered_unexpected_keys,
+                    mismatched_shapes,
+                ) = _load_filtered_state_dict(
+                    model,
+                    shard_state_dict,
+                    f"pretrained shard {shard_file}",
+                )
+                loaded_keys_accum.update(loaded_keys)
+                load_unexpected_keys_accum.update(unexpected_keys)
+                filtered_unexpected_keys_accum.update(filtered_unexpected_keys)
+                mismatched_shapes_accum.update(mismatched_shapes)
                 # Free shard immediately
                 del shard_state_dict
                 gc.collect()
-            if missing_keys_accum:
-                print(f"Missing keys when loading sharded pretrained weights: {sorted(missing_keys_accum)} ... total={len(missing_keys_accum)}")
-            if unexpected_keys_accum:
-                print(f"Unexpected keys when loading sharded pretrained weights: {sorted(unexpected_keys_accum)} ... total={len(unexpected_keys_accum)}")
-            if not missing_keys_accum and not unexpected_keys_accum:
+            final_missing_keys = sorted(set(model.state_dict().keys()) - loaded_keys_accum)
+            if final_missing_keys:
+                print(
+                    "Missing keys when loading sharded pretrained weights: "
+                    f"{_preview_items(final_missing_keys)} ... total={len(final_missing_keys)}"
+                )
+            if load_unexpected_keys_accum:
+                print(
+                    "Unexpected keys when loading sharded pretrained weights: "
+                    f"{_preview_items(sorted(load_unexpected_keys_accum))} ... total={len(load_unexpected_keys_accum)}"
+                )
+            if (
+                not final_missing_keys
+                and not load_unexpected_keys_accum
+                and not filtered_unexpected_keys_accum
+                and not mismatched_shapes_accum
+            ):
                 print("Successfully loaded pretrained base weights (sharded)")
         elif os.path.exists(safetensors_path):
             # Handle single safetensors file
             print(f"Loading weights from safetensors: {safetensors_path}")
             state_dict = load_file(safetensors_path)
-            missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
+            missing_keys, unexpected_keys, _loaded_keys, filtered_unexpected_keys, mismatched_shapes = _load_filtered_state_dict(
+                model,
+                state_dict,
+                "pretrained weights",
+            )
             if missing_keys:
-                print(f"Missing keys when loading pretrained weights: {missing_keys}")
+                print(
+                    "Missing keys when loading pretrained weights: "
+                    f"{_preview_items(sorted(missing_keys))} ... total={len(missing_keys)}"
+                )
             if unexpected_keys:
-                print(f"Unexpected keys when loading pretrained weights: {unexpected_keys}")
-            if not missing_keys and not unexpected_keys:
+                print(
+                    "Unexpected keys when loading pretrained weights: "
+                    f"{_preview_items(sorted(unexpected_keys))} ... total={len(unexpected_keys)}"
+                )
+            if not missing_keys and not unexpected_keys and not filtered_unexpected_keys and not mismatched_shapes:
                 print("Successfully loaded pretrained base weights")
         else:
             raise FileNotFoundError(
@@ -398,14 +507,25 @@ class VLA(PreTrainedModel):
             state_dict = {k.replace(".base_layer.", "."): v for k, v in state_dict.items()}
 
         # Load weights
-        missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
+        missing_keys, unexpected_keys, _loaded_keys, filtered_unexpected_keys, mismatched_shapes = _load_filtered_state_dict(
+            model,
+            state_dict,
+            "pretrained weights",
+        )
             
         if missing_keys:
-            print(f"Missing keys when loading pretrained weights: {missing_keys}")
+            print(
+                "Missing keys when loading pretrained weights: "
+                f"{_preview_items(sorted(missing_keys))} ... total={len(missing_keys)}"
+            )
         if unexpected_keys:
-            print(f"Unexpected keys when loading pretrained weights: {unexpected_keys}")
+            print(
+                "Unexpected keys when loading pretrained weights: "
+                f"{_preview_items(sorted(unexpected_keys))} ... total={len(unexpected_keys)}"
+            )
         
-        print("Successfully loaded pretrained weights")
+        if not missing_keys and not unexpected_keys and not filtered_unexpected_keys and not mismatched_shapes:
+            print("Successfully loaded pretrained weights")
 
         print(f"{cls}\n")
         return model
@@ -466,16 +586,25 @@ class VLA(PreTrainedModel):
             print("State dict already has 'action_head.model.base_model.model' pattern, skipping key rewrite")
         
         # Load only the weights into the existing model
-        missing_keys, unexpected_keys = self.load_state_dict(state_dict, strict=False)
-        
-        print("Successfully loaded LoRA state dict")
+        missing_keys, unexpected_keys, _loaded_keys, filtered_unexpected_keys, mismatched_shapes = _load_filtered_state_dict(
+            self,
+            state_dict,
+            "LoRA weights",
+        )
             
         if missing_keys:
-            print(f"Missing keys when loading LoRA weights: {missing_keys}")
+            print(
+                "Missing keys when loading LoRA weights: "
+                f"{_preview_items(sorted(missing_keys))} ... total={len(missing_keys)}"
+            )
         if unexpected_keys:
-            print(f"Unexpected keys when loading LoRA weights: {unexpected_keys}")
+            print(
+                "Unexpected keys when loading LoRA weights: "
+                f"{_preview_items(sorted(unexpected_keys))} ... total={len(unexpected_keys)}"
+            )
         
-        print("Successfully loaded LoRA weights")
+        if not missing_keys and not unexpected_keys and not filtered_unexpected_keys and not mismatched_shapes:
+            print("Successfully loaded LoRA weights")
 
     @classmethod
     def from_config_with_lora_weights(
@@ -562,14 +691,25 @@ class VLA(PreTrainedModel):
                 new_state_dict[new_k] = v
             state_dict = new_state_dict
 
-        missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
+        missing_keys, unexpected_keys, _loaded_keys, filtered_unexpected_keys, mismatched_shapes = _load_filtered_state_dict(
+            model,
+            state_dict,
+            "pretrained weights",
+        )
             
         if missing_keys:
-            print(f"Missing keys when loading pretrained weights: {missing_keys}")
+            print(
+                "Missing keys when loading pretrained weights: "
+                f"{_preview_items(sorted(missing_keys))} ... total={len(missing_keys)}"
+            )
         if unexpected_keys:
-            print(f"Unexpected keys when loading pretrained weights: {unexpected_keys}")
+            print(
+                "Unexpected keys when loading pretrained weights: "
+                f"{_preview_items(sorted(unexpected_keys))} ... total={len(unexpected_keys)}"
+            )
         
-        print("Successfully loaded pretrained weights")
+        if not missing_keys and not unexpected_keys and not filtered_unexpected_keys and not mismatched_shapes:
+            print("Successfully loaded pretrained weights")
 
         print(f"{cls}\n")
         return model

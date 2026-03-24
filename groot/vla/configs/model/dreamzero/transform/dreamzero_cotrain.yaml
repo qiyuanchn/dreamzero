@@ -7,7 +7,7 @@ defaults:
 
 max_length: 512
 num_views: 1
-tokenizer_path: "google/umt5-xxl"
+tokenizer_path: "/home/zqy/ws/dreamzero/checkpoints/umt5-xxl"
 ################################################################################
 # Data Collator
 ################################################################################

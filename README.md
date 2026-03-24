@@ -168,7 +168,7 @@ The server saves:
 
 ### Downloading Pretrained Base Model Weights
 
-DreamZero is built on top of [Wan2.1-I2V-14B-480P](https://huggingface.co/Wan-AI/Wan2.1-I2V-14B-480P) and uses the [umt5-xxl](https://huggingface.co/google/umt5-xxl) tokenizer. Download both before training:
+DreamZero is built on top of [Wan2.1-Fun-V1.1-1.3B-InP](https://huggingface.co/alibaba-pai/Wan2.1-Fun-V1.1-1.3B-InP) and uses the [umt5-xxl](https://huggingface.co/google/umt5-xxl) tokenizer. Download both before training:
 
 ```bash
 pip install "huggingface_hub[cli]"
@@ -176,8 +176,8 @@ pip install "huggingface_hub[cli]"
 # You may need to set your HuggingFace token:
 # export HF_TOKEN=<YOUR_HUGGINGFACE_TOKEN>
 
-# Download Wan2.1 model weights (~28GB)
-hf download Wan-AI/Wan2.1-I2V-14B-480P --local-dir ./checkpoints/Wan2.1-I2V-14B-480P
+# Download Wan2.1-Fun 1.3B model weights (~20GB)
+hf download alibaba-pai/Wan2.1-Fun-V1.1-1.3B-InP --local-dir ./checkpoints/Wan2.1-Fun-V1.1-1.3B-InP
 
 # Download umt5-xxl tokenizer
 hf download google/umt5-xxl --local-dir ./checkpoints/umt5-xxl
@@ -213,7 +213,7 @@ export OUTPUT_DIR="./checkpoints/dreamzero_droid"
 export NUM_GPUS=4
 
 # Point to your downloaded model weights (if not using default paths)
-export WAN_CKPT_DIR="./checkpoints/Wan2.1-I2V-14B-480P"
+export WAN_CKPT_DIR="./checkpoints/Wan2.1-Fun-V1.1-1.3B-InP"
 export TOKENIZER_DIR="./checkpoints/umt5-xxl"
 
 # Launch training

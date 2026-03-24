@@ -334,13 +334,13 @@ if [ -z "${NUM_GPUS:-}" ]; then
 fi
 NUM_GPUS=${NUM_GPUS:-8}
 
-WAN_CKPT_DIR=${WAN_CKPT_DIR:-"./checkpoints/Wan2.1-I2V-14B-480P"}
+WAN_CKPT_DIR=${WAN_CKPT_DIR:-"./checkpoints/Wan2.1-Fun-V1.1-1.3B-InP"}
 TOKENIZER_DIR=${TOKENIZER_DIR:-"./checkpoints/umt5-xxl"}
 # =======================================
 
 # Auto-download weights if missing
 if [ ! -d "$WAN_CKPT_DIR" ] || [ -z "$(ls -A "$WAN_CKPT_DIR" 2>/dev/null)" ]; then
-    huggingface-cli download Wan-AI/Wan2.1-I2V-14B-480P --local-dir "$WAN_CKPT_DIR"
+    hf download alibaba-pai/Wan2.1-Fun-V1.1-1.3B-InP --local-dir "$WAN_CKPT_DIR"
 fi
 if [ ! -d "$TOKENIZER_DIR" ] || [ -z "$(ls -A "$TOKENIZER_DIR" 2>/dev/null)" ]; then
     huggingface-cli download google/umt5-xxl --local-dir "$TOKENIZER_DIR"
@@ -365,7 +365,7 @@ torchrun --nproc_per_node $NUM_GPUS --standalone \
     action_horizon=24 \
     num_views=3 \
     model=dreamzero/vla \
-    model/dreamzero/action_head=wan_flow_matching_action_tf \
+    model/dreamzero/action_head=wan_flow_matching_action_tf_wan13 \
     model/dreamzero/transform=dreamzero_cotrain \
     num_frame_per_block=2 \
     num_action_per_block=24 \
@@ -455,7 +455,7 @@ DATA_ROOT=/path/to/your_dataset OUTPUT_DIR=./checkpoints/run1 NUM_GPUS=4 \
 - [ ] YAML `modality_keys` match `modality.json` keys exactly (with `state.`/`action.`/`video.`/`annotation.` prefix)
 - [ ] Every state and action key appears in `normalization_modes` in the transform block
 - [ ] `relative_action_keys` are sub-key names that exist in both state and action
-- [ ] Wan2.1-I2V-14B-480P and umt5-xxl weights are available
+- [ ] Wan2.1-Fun-V1.1-1.3B-InP and umt5-xxl weights are available
 - [ ] DreamZero-AgiBot checkpoint is downloaded to `./checkpoints/DreamZero-AgiBot`
 
 ---
