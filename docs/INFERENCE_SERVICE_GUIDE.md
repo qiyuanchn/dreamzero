@@ -18,10 +18,10 @@
 - client 入口: `test_client_AR.py`
 
 当前验证状态：
-- 单卡可以稳定跑 `zero-image` 和真实视频的首帧推理
-- 单卡在真实视频 `4` 帧 chunk 上容易 OOM
-- 双卡可以跑通真实视频首帧和后续 `4` 帧 chunk
-- `reset` 阶段保存视频仍然可能 OOM
+- 在 `ENABLE_TENSORRT=true` 下，单卡和双卡都可以跑通真实视频多 chunk 推理
+- 单卡冷启动更快，双卡冷启动更慢
+- 热态后双卡 chunk 更快
+- 本轮验证里，`reset` 保存视频成功
 - 服务端返回的动作是 `(24, 8)`，由：
   - `action.joint_position: (24, 7)`
   - `action.gripper_position: (24,)`
@@ -36,6 +36,8 @@ source /home/zqy/miniconda3/etc/profile.d/conda.sh
 conda activate dreamzero
 cd /home/zqy/ws/dreamzero
 export PYTHONPATH=/home/zqy/ws/dreamzero
+export ENABLE_TENSORRT=true
+export DREAMZERO_OUTPUT_ROOT=/home/zqy/ws/dreamzero/outputs
 ```
 
 常用模型路径：
@@ -44,6 +46,7 @@ export PYTHONPATH=/home/zqy/ws/dreamzero
 MODEL_PATH=/home/zqy/ws/dreamzero/checkpoints/DreamZero-DROID
 WAN_CKPT_DIR=/home/zqy/ws/dreamzero/checkpoints/Wan2.1-Fun-V1.1-1.3B-InP
 TOKENIZER_DIR=/home/zqy/ws/dreamzero/checkpoints/umt5-xxl
+OUTPUT_ROOT=/home/zqy/ws/dreamzero/outputs
 ```
 
 ## 3. 直接命令启动服务
@@ -58,6 +61,8 @@ conda activate dreamzero
 cd /home/zqy/ws/dreamzero
 PYTHONPATH=/home/zqy/ws/dreamzero \
 CUDA_VISIBLE_DEVICES=0 \
+ENABLE_TENSORRT=true \
+DREAMZERO_OUTPUT_ROOT=/home/zqy/ws/dreamzero/outputs \
 DREAMZERO_SAVE_RESET_VIDEO=0 \
 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
 python -m torch.distributed.run --standalone --nproc_per_node=1 \
@@ -85,6 +90,8 @@ conda activate dreamzero
 cd /home/zqy/ws/dreamzero
 PYTHONPATH=/home/zqy/ws/dreamzero \
 CUDA_VISIBLE_DEVICES=0,1 \
+ENABLE_TENSORRT=true \
+DREAMZERO_OUTPUT_ROOT=/home/zqy/ws/dreamzero/outputs \
 DREAMZERO_SAVE_RESET_VIDEO=0 \
 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
 python -m torch.distributed.run --standalone --nproc_per_node=2 \
@@ -99,8 +106,9 @@ socket_test_optimized_AR.py \
 - 长时间推理验证
 
 当前实际验证结果：
-- 单卡：真实视频首帧成功，进入 `4` 帧 chunk 后 OOM
-- 双卡：真实视频首帧、`Chunk 0`、`Chunk 1` 都成功
+- 单卡：真实视频 `Initial + Chunk 0 + Chunk 1 + Chunk 2 + reset` 成功
+- 双卡：真实视频 `Initial + Chunk 0 + Chunk 1 + Chunk 2 + reset` 成功
+- 冷启动阶段单卡更快；热态后双卡更快
 
 ## 4. 用脚本启动服务
 
@@ -113,6 +121,7 @@ socket_test_optimized_AR.py \
 ```bash
 CUDA_VISIBLE_DEVICES=0 \
 PORT=5999 \
+OUTPUT_ROOT=/home/zqy/ws/dreamzero/outputs \
 MODEL_PATH=/home/zqy/ws/dreamzero/checkpoints/DreamZero-DROID \
 bash /home/zqy/ws/dreamzero/scripts/inference/start_dreamzero_service.sh
 ```
@@ -122,14 +131,17 @@ bash /home/zqy/ws/dreamzero/scripts/inference/start_dreamzero_service.sh
 ```bash
 CUDA_VISIBLE_DEVICES=0,1 \
 PORT=6000 \
+OUTPUT_ROOT=/home/zqy/ws/dreamzero/outputs \
 MODEL_PATH=/home/zqy/ws/dreamzero/checkpoints/DreamZero-DROID \
 bash /home/zqy/ws/dreamzero/scripts/inference/start_dreamzero_service.sh
 ```
 
 默认行为：
 - 后台用 `screen` 托管服务
+- 默认开启 `ENABLE_TENSORRT=true`
 - 默认关闭 `reset` 时视频保存：`DREAMZERO_SAVE_RESET_VIDEO=0`
-- 日志写到：`logs/dreamzero_service_port_<PORT>.log`
+- 日志写到：`outputs/logs/dreamzero_service_port_<PORT>.log`
+- 生成视频写到：`outputs/inference/real_world_eval_gen_<DATE>_<INDEX>/<CHECKPOINT_NAME>/`
 
 ## 5. screen 怎么看输出
 
@@ -158,7 +170,7 @@ screen -r dreamzero_service
 如果你只想看日志，也可以：
 
 ```bash
-tail -f /home/zqy/ws/dreamzero/logs/dreamzero_service_port_6000.log
+tail -f /home/zqy/ws/dreamzero/outputs/logs/dreamzero_service_port_6000.log
 ```
 
 ## 6. 停止服务
@@ -233,22 +245,28 @@ source /home/zqy/miniconda3/etc/profile.d/conda.sh
 conda activate dreamzero
 cd /home/zqy/ws/dreamzero
 PYTHONPATH=/home/zqy/ws/dreamzero \
-python test_client_AR.py --host 127.0.0.1 --port 6000 --num-chunks 2
+python test_client_AR.py --host 127.0.0.1 --port 6000 --num-chunks 3
 ```
 
 当前实际结果：
 - 单卡：
-  - 首帧成功
-  - 第一个 `4` 帧 chunk OOM
+  - `Initial`: 客户端约 `8.77s`
+  - `Chunk 0`: 客户端约 `23.49s`
+  - `Chunk 1`: 客户端约 `1.63s`
+  - `Chunk 2`: 客户端约 `1.74s`
+  - `reset` 成功保存视频
 - 双卡：
-  - 首帧成功
-  - `Chunk 0` 成功
-  - `Chunk 1` 成功
+  - `Initial`: 客户端约 `50.60s`
+  - `Chunk 0`: 客户端约 `26.10s`
+  - `Chunk 1`: 客户端约 `0.92s`
+  - `Chunk 2`: 客户端约 `0.96s`
+  - `reset` 成功保存视频
 
-双卡本次真实视频验证耗时参考：
-- 初始单帧：约 `9.96s`
-- `Chunk 0`: 约 `40.63s`
-- `Chunk 1`: 约 `1.34s`
+这一轮实验里更有参考价值的结论是：
+- 单卡冷启动明显更快
+- 双卡冷启动明显更慢
+- 热态后双卡 chunk 更快
+- 单卡、双卡在热态后都能稳定多 chunk
 
 ## 8. 输入 / 输出格式
 
@@ -338,7 +356,7 @@ DREAMZERO_SAVE_RESET_VIDEO=0
 
 请看：
 - `screen -r dreamzero_service`
-- 或者 `tail -f logs/dreamzero_service_port_<PORT>.log`
+- 或者 `tail -f outputs/logs/dreamzero_service_port_<PORT>.log`
 
 ### 11.2 为什么 zero-image 能跑，真实视频 chunk 跑不动？
 
@@ -348,8 +366,9 @@ DREAMZERO_SAVE_RESET_VIDEO=0
 - 中间激活更大
 
 当前验证表明：
-- 单卡只适合最小验证和真实首帧
-- 双卡更适合真实视频 chunk
+- 在 `ENABLE_TENSORRT=true` 下，单卡和双卡都可以跑真实视频多 chunk
+- 单卡更适合快速起服务和低成本验证
+- 双卡更适合热态后的更快 chunk 推理
 
 ### 11.3 推荐端口怎么选？
 
@@ -359,20 +378,28 @@ DREAMZERO_SAVE_RESET_VIDEO=0
 
 这样你自己区分服务方便，也不容易和之前的测试混在一起。
 
+### 11.4 输出都放在哪里？
+
+默认都放在：
+- `outputs/logs`
+- `outputs/inference`
+- `outputs/experiments`
+- `outputs/reports`
+
 ## 12. 推荐工作流
 
 ### 12.1 只想确认服务能不能跑
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 PORT=5999 bash scripts/inference/start_dreamzero_service.sh
+CUDA_VISIBLE_DEVICES=0 PORT=5999 OUTPUT_ROOT=/home/zqy/ws/dreamzero/outputs bash scripts/inference/start_dreamzero_service.sh
 PYTHONPATH=/home/zqy/ws/dreamzero python test_client_AR.py --host 127.0.0.1 --port 5999 --use-zero-images --num-chunks 1
 ```
 
 ### 12.2 想做真实视频验证
 
 ```bash
-CUDA_VISIBLE_DEVICES=0,1 PORT=6000 bash scripts/inference/start_dreamzero_service.sh
-PYTHONPATH=/home/zqy/ws/dreamzero python test_client_AR.py --host 127.0.0.1 --port 6000 --num-chunks 2
+CUDA_VISIBLE_DEVICES=0,1 PORT=6000 OUTPUT_ROOT=/home/zqy/ws/dreamzero/outputs bash scripts/inference/start_dreamzero_service.sh
+PYTHONPATH=/home/zqy/ws/dreamzero python test_client_AR.py --host 127.0.0.1 --port 6000 --num-chunks 3
 ```
 
 ### 12.3 验证完停服务
@@ -383,8 +410,10 @@ PORT=6000 bash scripts/inference/stop_dreamzero_service.sh
 
 ## 13. 你现在最该记住的结论
 
-- 单卡：适合最小验证，不适合真实多帧 chunk
-- 双卡：适合真实视频推理
-- 默认建议关闭 `reset save video`
+- `ENABLE_TENSORRT=true` 建议默认打开
+- 输出统一放在 `outputs/`
+- 单卡：冷启动更快，热态后可稳定多 chunk
+- 双卡：冷启动更慢，热态后 chunk 更快
+- 是否关闭 `reset save video` 取决于你要不要自动留视频
 - 服务端输出是 `(24, 8)`，来自 `7维 joint + 1维 gripper`
 - 看后台输出优先用 `screen -r dreamzero_service`

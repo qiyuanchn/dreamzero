@@ -2,11 +2,12 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+OUTPUT_ROOT="${OUTPUT_ROOT:-$ROOT_DIR/outputs}"
 PORT="${PORT:-5999}"
 CUDA_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1}"
 MODEL_PATH="${MODEL_PATH:-$ROOT_DIR/checkpoints/DreamZero-DROID}"
 CONDA_ENV="${CONDA_ENV:-dreamzero}"
-LOG_DIR="${LOG_DIR:-$ROOT_DIR/logs}"
+LOG_DIR="${LOG_DIR:-$OUTPUT_ROOT/logs}"
 LOG_FILE="$LOG_DIR/dreamzero_service_port_${PORT}.log"
 PID_FILE="$LOG_DIR/dreamzero_service_port_${PORT}.pid"
 SESSION_FILE="$LOG_DIR/dreamzero_service_port_${PORT}.screen"
@@ -14,10 +15,12 @@ TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-50000}"
 PYTORCH_ALLOC="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 DREAMZERO_SAVE_RESET_VIDEO="${DREAMZERO_SAVE_RESET_VIDEO:-0}"
 ENABLE_DIT_CACHE="${ENABLE_DIT_CACHE:-0}"
+ENABLE_TENSORRT="${ENABLE_TENSORRT:-true}"
+DREAMZERO_OUTPUT_ROOT="${DREAMZERO_OUTPUT_ROOT:-$OUTPUT_ROOT}"
 SCREEN_SESSION="${SCREEN_SESSION:-dreamzero_service}"
 SCREEN_WINDOW="${SCREEN_WINDOW:-port_${PORT}}"
 
-mkdir -p "$LOG_DIR"
+mkdir -p "$LOG_DIR" "$DREAMZERO_OUTPUT_ROOT"
 
 if [[ -f "$SESSION_FILE" ]]; then
   IFS=':' read -r OLD_SESSION OLD_WINDOW < "$SESSION_FILE" || true
@@ -40,6 +43,8 @@ echo "  Port: $PORT"
 echo "  GPUs: $CUDA_DEVICES"
 echo "  Model: $MODEL_PATH"
 echo "  Save reset video: $DREAMZERO_SAVE_RESET_VIDEO"
+echo "  Output root: $DREAMZERO_OUTPUT_ROOT"
+echo "  Enable TensorRT: $ENABLE_TENSORRT"
 
 screen -S "$SCREEN_SESSION" -X select . >/dev/null 2>&1 || screen -dmS "$SCREEN_SESSION"
 
@@ -56,6 +61,8 @@ export PYTHONPATH=$ROOT_DIR
 export CUDA_VISIBLE_DEVICES=$CUDA_DEVICES
 export PYTORCH_CUDA_ALLOC_CONF=$PYTORCH_ALLOC
 export DREAMZERO_SAVE_RESET_VIDEO=$DREAMZERO_SAVE_RESET_VIDEO
+export ENABLE_TENSORRT=$ENABLE_TENSORRT
+export DREAMZERO_OUTPUT_ROOT=$DREAMZERO_OUTPUT_ROOT
 $PYTHON_CMD
 EOF
 )
@@ -77,6 +84,8 @@ echo "  Port: $PORT"
 echo "  GPUs: $CUDA_DEVICES"
 echo "  Model: $MODEL_PATH"
 echo "  Save reset video: $DREAMZERO_SAVE_RESET_VIDEO"
+echo "  Output root: $DREAMZERO_OUTPUT_ROOT"
+echo "  Enable TensorRT: $ENABLE_TENSORRT"
 echo "  Log: $LOG_FILE"
 echo "  To watch output: screen -r $SCREEN_SESSION"
 echo "  In screen, switch to window: $SCREEN_WINDOW"
