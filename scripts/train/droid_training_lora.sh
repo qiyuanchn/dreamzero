@@ -1,37 +1,74 @@
 #!/bin/bash
-# DreamZero DROID Training Script
+# DreamZero DROID LoRA Training Script (Wan2.1 1.3B)
 #
 # Usage:
-#   # Set your dataset path and output directory, then run:
-#   bash scripts/train/droid_training.sh
-#
-# Prerequisites:
-#   - DROID dataset in LeRobot format at DROID_DATA_ROOT
-#     Download: huggingface-cli download GEAR-Dreams/DreamZero-DROID-Data --repo-type dataset --local-dir ./data/droid_lerobot
-#     Or convert from scratch: see scripts/data/convert_droid.py
-#   - Wan2.1-Fun-V1.1-1.3B-InP weights (auto-downloaded or pre-downloaded from HuggingFace)
-#     Download: hf download alibaba-pai/Wan2.1-Fun-V1.1-1.3B-InP --local-dir ./checkpoints/Wan2.1-Fun-V1.1-1.3B-InP
-#   - umt5-xxl tokenizer (auto-downloaded or pre-downloaded from HuggingFace)
-#     Download: huggingface-cli download google/umt5-xxl --local-dir ./checkpoints/umt5-xxl
+#   source /home/zqy/miniconda3/etc/profile.d/conda.sh
+#   conda activate dreamzero
+#   CUDA_VISIBLE_DEVICES=0,1,2,3 bash scripts/train/droid_training_lora.sh
 
 export HYDRA_FULL_ERROR=1
 
-# ============ USER CONFIGURATION ============
-# Dataset path (DROID in LeRobot format)
-DROID_DATA_ROOT=${DROID_DATA_ROOT:-"./data/droid_lerobot"}
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+DREAMZERO_ROOT=${DREAMZERO_ROOT:-"$REPO_ROOT"}
+DREAMZERO_OUTPUT_ROOT=${DREAMZERO_OUTPUT_ROOT:-"$DREAMZERO_ROOT/outputs"}
 
-# Output directory for training checkpoints
-OUTPUT_DIR=${OUTPUT_DIR:-"./checkpoints/dreamzero_droid_lora"}
+resolve_data_root() {
+    local candidate="$1"
+    if [ -d "$candidate/data" ] && [ -d "$candidate/meta" ]; then
+        echo "$candidate"
+        return 0
+    fi
+    if [ -d "$candidate/snapshots" ]; then
+        local latest_snapshot
+        latest_snapshot="$(find "$candidate/snapshots" -mindepth 1 -maxdepth 1 -type d | sort | tail -n 1)"
+        if [ -n "$latest_snapshot" ] && [ -d "$latest_snapshot/data" ] && [ -d "$latest_snapshot/meta" ]; then
+            echo "$latest_snapshot"
+            return 0
+        fi
+    fi
+    return 1
+}
 
-# Number of GPUs to use
-NUM_GPUS=${NUM_GPUS:-8}
+default_data_root="./data/droid_lerobot"
+if [ -d "/data2/zqy/datasets--GEAR-Dreams--DreamZero-DROID-Data" ]; then
+    default_data_root="/data2/zqy/datasets--GEAR-Dreams--DreamZero-DROID-Data"
+fi
 
-# Model weight paths (download from HuggingFace if not already present)
-WAN_CKPT_DIR=${WAN_CKPT_DIR:-"./checkpoints/Wan2.1-Fun-V1.1-1.3B-InP"}
-TOKENIZER_DIR=${TOKENIZER_DIR:-"./checkpoints/umt5-xxl"}
-# =============================================
+DROID_DATA_ROOT=${DROID_DATA_ROOT:-"$default_data_root"}
+OUTPUT_DIR=${OUTPUT_DIR:-"$DREAMZERO_OUTPUT_ROOT/training/droid_lora"}
+TB_LOGDIR=${TB_LOGDIR:-"$OUTPUT_DIR/tensorboard"}
+REPORT_TO=${REPORT_TO:-tensorboard}
+NUM_GPUS=${NUM_GPUS:-4}
+PER_DEVICE_BS=${PER_DEVICE_BS:-1}
+GLOBAL_BATCH_SIZE=${GLOBAL_BATCH_SIZE:-$((NUM_GPUS * PER_DEVICE_BS))}
+MAX_STEPS=${MAX_STEPS:-10000}
+SAVE_STEPS=${SAVE_STEPS:-1000}
+LOGGING_STEPS=${LOGGING_STEPS:-10}
+NUM_WORKERS=${NUM_WORKERS:-4}
+WAN_CKPT_DIR=${WAN_CKPT_DIR:-"$DREAMZERO_ROOT/checkpoints/Wan2.1-Fun-V1.1-1.3B-InP"}
+TOKENIZER_DIR=${TOKENIZER_DIR:-"$DREAMZERO_ROOT/checkpoints/umt5-xxl"}
+PYTHON_BIN=${DREAMZERO_PYTHON:-}
 
-# ============ AUTO-DOWNLOAD WEIGHTS ============
+if [ -z "$PYTHON_BIN" ]; then
+    if [ -n "${CONDA_PREFIX:-}" ] && [ -x "${CONDA_PREFIX}/bin/python" ]; then
+        PYTHON_BIN="${CONDA_PREFIX}/bin/python"
+    elif [ -x "/home/zqy/miniconda3/envs/dreamzero/bin/python" ]; then
+        PYTHON_BIN="/home/zqy/miniconda3/envs/dreamzero/bin/python"
+    else
+        PYTHON_BIN="$(command -v python3)"
+    fi
+fi
+
+if ! RESOLVED_DROID_DATA_ROOT="$(resolve_data_root "$DROID_DATA_ROOT")"; then
+    echo "ERROR: DROID dataset not found or not in expected layout: $DROID_DATA_ROOT"
+    echo "Expected either:"
+    echo "  - <root>/data and <root>/meta"
+    echo "  - Hugging Face cache root with snapshots/<hash>/data and snapshots/<hash>/meta"
+    exit 1
+fi
+DROID_DATA_ROOT="$RESOLVED_DROID_DATA_ROOT"
+
 if [ ! -d "$WAN_CKPT_DIR" ] || [ -z "$(ls -A "$WAN_CKPT_DIR" 2>/dev/null)" ]; then
     echo "Wan2.1-Fun-V1.1-1.3B-InP not found at $WAN_CKPT_DIR. Downloading from HuggingFace..."
     hf download alibaba-pai/Wan2.1-Fun-V1.1-1.3B-InP --local-dir "$WAN_CKPT_DIR"
@@ -41,17 +78,13 @@ if [ ! -d "$TOKENIZER_DIR" ] || [ -z "$(ls -A "$TOKENIZER_DIR" 2>/dev/null)" ]; 
     echo "umt5-xxl tokenizer not found at $TOKENIZER_DIR. Downloading from HuggingFace..."
     huggingface-cli download google/umt5-xxl --local-dir "$TOKENIZER_DIR"
 fi
-# ================================================
 
-# Validate dataset exists
-if [ ! -d "$DROID_DATA_ROOT" ]; then
-    echo "ERROR: DROID dataset not found at $DROID_DATA_ROOT"
-    echo "Download with: huggingface-cli download GEAR-Dreams/DreamZero-DROID-Data --repo-type dataset --local-dir $DROID_DATA_ROOT"
-    exit 1
-fi
+mkdir -p "$OUTPUT_DIR" "$TB_LOGDIR"
+cd "$DREAMZERO_ROOT"
 
-torchrun --nproc_per_node $NUM_GPUS --standalone groot/vla/experiment/experiment.py \
-    report_to=none \
+exec "$PYTHON_BIN" -m torch.distributed.run --nproc_per_node "$NUM_GPUS" --standalone \
+    groot/vla/experiment/experiment.py \
+    report_to="$REPORT_TO" \
     data=dreamzero/droid_relative \
     wandb_project=dreamzero \
     train_architecture=lora \
@@ -67,28 +100,31 @@ torchrun --nproc_per_node $NUM_GPUS --standalone groot/vla/experiment/experiment
     seed=42 \
     training_args.learning_rate=1e-4 \
     training_args.deepspeed="groot/vla/configs/deepspeed/zero2.json" \
-    save_steps=1000 \
+    +training_args.logging_dir="$TB_LOGDIR" \
+    save_steps="$SAVE_STEPS" \
+    logging_steps="$LOGGING_STEPS" \
     training_args.warmup_ratio=0.05 \
-    output_dir=$OUTPUT_DIR \
-    per_device_train_batch_size=1 \
-    max_steps=100 \
+    output_dir="$OUTPUT_DIR" \
+    per_device_train_batch_size="$PER_DEVICE_BS" \
+    global_batch_size="$GLOBAL_BATCH_SIZE" \
+    max_steps="$MAX_STEPS" \
     weight_decay=1e-5 \
     save_total_limit=10 \
     upload_checkpoints=false \
     bf16=true \
     tf32=true \
     eval_bf16=true \
-    dataloader_pin_memory=false \
-    dataloader_num_workers=1 \
+    dataloader_pin_memory=true \
+    dataloader_num_workers="$NUM_WORKERS" \
     image_resolution_width=320 \
     image_resolution_height=176 \
     save_lora_only=true \
     max_chunk_size=4 \
     frame_seqlen=880 \
-    save_strategy=no \
-    droid_data_root=$DROID_DATA_ROOT \
-    dit_version=$WAN_CKPT_DIR \
-    text_encoder_pretrained_path=$WAN_CKPT_DIR/models_t5_umt5-xxl-enc-bf16.pth \
-    image_encoder_pretrained_path=$WAN_CKPT_DIR/models_clip_open-clip-xlm-roberta-large-vit-huge-14.pth \
-    vae_pretrained_path=$WAN_CKPT_DIR/Wan2.1_VAE.pth \
-    tokenizer_path=$TOKENIZER_DIR
+    save_strategy=steps \
+    droid_data_root="$DROID_DATA_ROOT" \
+    dit_version="$WAN_CKPT_DIR" \
+    text_encoder_pretrained_path="$WAN_CKPT_DIR/models_t5_umt5-xxl-enc-bf16.pth" \
+    image_encoder_pretrained_path="$WAN_CKPT_DIR/models_clip_open-clip-xlm-roberta-large-vit-huge-14.pth" \
+    vae_pretrained_path="$WAN_CKPT_DIR/Wan2.1_VAE.pth" \
+    tokenizer_path="$TOKENIZER_DIR"
