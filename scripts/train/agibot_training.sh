@@ -17,12 +17,18 @@
 
 export HYDRA_FULL_ERROR=1
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+DREAMZERO_ROOT=${DREAMZERO_ROOT:-"$REPO_ROOT"}
+source "$REPO_ROOT/scripts/lib/output_layout.sh"
+DREAMZERO_OUTPUT_ROOT="$(dz_default_output_root "$DREAMZERO_ROOT")"
+
 # ============ CHANGE THESE VARIABLES ============
 # Dataset path (AGIbot in LeRobot format: state 32, action 22, videos top_head, hand_left, hand_right)
 AGIBOT_DATA_ROOT=${AGIBOT_DATA_ROOT:-"./data/agibot_lerobot"}
 
 # Output directory for training checkpoints
-OUTPUT_DIR=${OUTPUT_DIR:-"./checkpoints/dreamzero_agibot_lora_5k"}
+OUTPUT_DIR=${OUTPUT_DIR:-"$(dz_default_train_dir "$DREAMZERO_OUTPUT_ROOT" "agibot" "lora")"}
 
 # Number of GPUs to use (default: all visible GPUs, so 4-GPU machines use 4 without setting NUM_GPUS)
 if [ -z "${NUM_GPUS}" ]; then
@@ -31,8 +37,8 @@ fi
 NUM_GPUS=${NUM_GPUS:-8}
 
 # Model weight paths (download from HuggingFace if not already present)
-WAN_CKPT_DIR=${WAN_CKPT_DIR:-"./checkpoints/Wan2.1-Fun-V1.1-1.3B-InP"}
-TOKENIZER_DIR=${TOKENIZER_DIR:-"./checkpoints/umt5-xxl"}
+WAN_CKPT_DIR=${WAN_CKPT_DIR:-"$DREAMZERO_ROOT/checkpoints/Wan2.1-Fun-V1.1-1.3B-InP"}
+TOKENIZER_DIR=${TOKENIZER_DIR:-"$DREAMZERO_ROOT/checkpoints/umt5-xxl"}
 # =============================================
 
 # ============ AUTO-DOWNLOAD WEIGHTS ============
@@ -53,6 +59,11 @@ if [ ! -d "$AGIBOT_DATA_ROOT" ]; then
     echo "Set AGIBOT_DATA_ROOT to your LeRobot-format AGIbot dataset (e.g. Dataset/3222_raw_assemble)"
     exit 1
 fi
+
+cd "$DREAMZERO_ROOT"
+mkdir -p "$OUTPUT_DIR" "$DREAMZERO_OUTPUT_ROOT/train"
+ln -sfn "$OUTPUT_DIR" "$DREAMZERO_OUTPUT_ROOT/train/latest"
+ln -sfn "$OUTPUT_DIR" "$DREAMZERO_OUTPUT_ROOT/train/latest_agibot_lora"
 
 torchrun --nproc_per_node $NUM_GPUS --standalone groot/vla/experiment/experiment.py \
     report_to=wandb \
@@ -96,6 +107,6 @@ torchrun --nproc_per_node $NUM_GPUS --standalone groot/vla/experiment/experiment
     image_encoder_pretrained_path=$WAN_CKPT_DIR/models_clip_open-clip-xlm-roberta-large-vit-huge-14.pth \
     vae_pretrained_path=$WAN_CKPT_DIR/Wan2.1_VAE.pth \
     tokenizer_path=$TOKENIZER_DIR \
-    pretrained_model_path=./checkpoints/DreamZero-AgiBot \
+    pretrained_model_path="$DREAMZERO_ROOT/checkpoints/DreamZero-AgiBot" \
     ++action_head_cfg.config.skip_component_loading=true \
     ++action_head_cfg.config.defer_lora_injection=true

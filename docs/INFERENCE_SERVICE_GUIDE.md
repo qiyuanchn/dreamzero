@@ -140,8 +140,9 @@ bash /home/zqy/ws/dreamzero/scripts/inference/start_dreamzero_service.sh
 - 后台用 `screen` 托管服务
 - 默认开启 `ENABLE_TENSORRT=true`
 - 默认关闭 `reset` 时视频保存：`DREAMZERO_SAVE_RESET_VIDEO=0`
-- 日志写到：`outputs/logs/dreamzero_service_port_<PORT>.log`
-- 生成视频写到：`outputs/inference/real_world_eval_gen_<DATE>_<INDEX>/<CHECKPOINT_NAME>/`
+- 日志写到对应 run 目录里，例如：`outputs/inference/<日期>/HH-MM-SS-<CHECKPOINT_NAME>/dreamzero_service_port_<PORT>.log`
+- 生成视频写到：`outputs/inference/<日期>/HH-MM-SS-<CHECKPOINT_NAME>/`
+- 同时会更新软链接：`outputs/inference/latest`
 
 ## 5. screen 怎么看输出
 
@@ -170,7 +171,7 @@ screen -r dreamzero_service
 如果你只想看日志，也可以：
 
 ```bash
-tail -f /home/zqy/ws/dreamzero/outputs/logs/dreamzero_service_port_6000.log
+tail -f /home/zqy/ws/dreamzero/outputs/inference/latest/dreamzero_service_port_6000.log
 ```
 
 ## 6. 停止服务
@@ -356,7 +357,7 @@ DREAMZERO_SAVE_RESET_VIDEO=0
 
 请看：
 - `screen -r dreamzero_service`
-- 或者 `tail -f outputs/logs/dreamzero_service_port_<PORT>.log`
+- 或者 `tail -f outputs/inference/latest/dreamzero_service_port_<PORT>.log`
 
 ### 11.2 为什么 zero-image 能跑，真实视频 chunk 跑不动？
 
@@ -381,7 +382,6 @@ DREAMZERO_SAVE_RESET_VIDEO=0
 ### 11.4 输出都放在哪里？
 
 默认都放在：
-- `outputs/logs`
 - `outputs/inference`
 - `outputs/experiments`
 - `outputs/reports`

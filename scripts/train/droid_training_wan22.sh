@@ -36,6 +36,8 @@ if [ ! -d "$DREAMZERO_ROOT/groot" ]; then
     echo "ERROR: No groot/ under $DREAMZERO_ROOT. Set DREAMZERO_ROOT to the dreamzero repo root that contains groot/."
     exit 1
 fi
+source "$DREAMZERO_ROOT/scripts/lib/output_layout.sh"
+DREAMZERO_OUTPUT_ROOT="$(dz_default_output_root "$DREAMZERO_ROOT")"
 
 # ============ USER CONFIGURATION ============
 NUM_GPUS=${NUM_GPUS:-8}
@@ -44,7 +46,7 @@ DROID_DATA_ROOT=${DROID_DATA_ROOT:-"$DREAMZERO_ROOT/data/droid_lerobot"}
 if [ "$DROID_DATA_ROOT" = "./data/droid_lerobot" ]; then
     DROID_DATA_ROOT="$DREAMZERO_ROOT/data/droid_lerobot"
 fi
-OUTPUT_DIR=${OUTPUT_DIR:-"$DREAMZERO_ROOT/checkpoints/dreamzero_droid_wan22_lora"}
+OUTPUT_DIR=${OUTPUT_DIR:-"$(dz_default_train_dir "$DREAMZERO_OUTPUT_ROOT" "droid" "lora_wan22")"}
 
 # Wan2.2-TI2V-5B checkpoint (contains: diffusion weights, T5, VAE)
 WAN22_CKPT_DIR=${WAN22_CKPT_DIR:-"$DREAMZERO_ROOT/checkpoints/Wan2.2-TI2V-5B"}
@@ -99,6 +101,9 @@ else
     echo "Using: $(command -v python3)"
 fi
 cd "$DREAMZERO_ROOT"
+mkdir -p "$OUTPUT_DIR" "$DREAMZERO_OUTPUT_ROOT/train"
+ln -sfn "$OUTPUT_DIR" "$DREAMZERO_OUTPUT_ROOT/train/latest"
+ln -sfn "$OUTPUT_DIR" "$DREAMZERO_OUTPUT_ROOT/train/latest_droid_lora_wan22"
 
 "${RUN_CMD[@]}" \
     report_to=wandb \

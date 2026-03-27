@@ -795,20 +795,24 @@ def main(args: Args) -> None:
     if rank == 0:
         logging.info("Creating server (host: %s, ip: %s)", hostname, local_ip)
         # Create output directory for videos
+        explicit_output_dir = os.getenv("DREAMZERO_INFERENCE_OUTPUT_DIR")
         output_root = os.getenv("DREAMZERO_OUTPUT_ROOT")
-        date_suffix = datetime.datetime.now().strftime("%Y%m%d")
+        output_date = os.getenv("DREAMZERO_OUTPUT_DATE") or datetime.datetime.now().strftime("%Y-%m-%d")
+        output_time = os.getenv("DREAMZERO_OUTPUT_TIME") or datetime.datetime.now().strftime("%H-%M-%S")
         checkpoint_name = os.path.basename(model_path)
-        if output_root:
+        if explicit_output_dir:
+            output_dir = explicit_output_dir
+        elif output_root:
             output_dir = os.path.join(
                 output_root,
                 "inference",
-                f"real_world_eval_gen_{date_suffix}_{args.index}",
-                checkpoint_name,
+                output_date,
+                f"{output_time}-{checkpoint_name}",
             )
         else:
             # Backward-compatible fallback: place outputs next to the checkpoint.
             parent_dir = os.path.dirname(model_path)
-            output_dir = os.path.join(parent_dir, f"real_world_eval_gen_{date_suffix}_{args.index}", checkpoint_name)
+            output_dir = os.path.join(parent_dir, output_date, f"{output_time}-{checkpoint_name}")
         os.makedirs(output_dir, exist_ok=True)
         logging.info("Videos will be saved to: %s", output_dir)
     else:

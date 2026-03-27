@@ -24,7 +24,7 @@
 
 - 自动识别普通 LeRobot 数据目录
 - 自动识别 Hugging Face cache/snapshot 数据目录
-- 默认把输出放到 `outputs/training/`
+- 默认把输出放到 `outputs/train/<日期>/HH-MM-SS-<embodiment>-<模式>/`
 - 默认开启 `report_to=tensorboard`
 
 ## 2. 环境准备
@@ -62,16 +62,14 @@ PYTHONPATH=/home/zqy/ws/dreamzero \
 CUDA_VISIBLE_DEVICES=0,1,2,3 \
 NUM_GPUS=4 \
 DROID_DATA_ROOT=/data2/zqy/datasets--GEAR-Dreams--DreamZero-DROID-Data \
-OUTPUT_DIR=/home/zqy/ws/dreamzero/outputs/training/droid_lora \
-TB_LOGDIR=/home/zqy/ws/dreamzero/outputs/training/droid_lora/tensorboard \
 bash /home/zqy/ws/dreamzero/scripts/train/droid_training_lora.sh
 ```
 
 默认行为：
 
 - `report_to=tensorboard`
-- checkpoint 输出到 `outputs/training/droid_lora`
-- TensorBoard 日志输出到 `outputs/training/droid_lora/tensorboard`
+- checkpoint 输出到 `outputs/train/<日期>/HH-MM-SS-droid-lora`
+- TensorBoard 日志输出到对应 run 下的 `tensorboard/`
 - `save_lora_only=true`
 
 常用覆盖项：
@@ -96,16 +94,14 @@ PYTHONPATH=/home/zqy/ws/dreamzero \
 CUDA_VISIBLE_DEVICES=0,1,2,3 \
 NUM_GPUS=4 \
 DROID_DATA_ROOT=/data2/zqy/datasets--GEAR-Dreams--DreamZero-DROID-Data \
-OUTPUT_DIR=/home/zqy/ws/dreamzero/outputs/training/droid_full \
-TB_LOGDIR=/home/zqy/ws/dreamzero/outputs/training/droid_full/tensorboard \
 bash /home/zqy/ws/dreamzero/scripts/train/droid_training_full_finetune.sh
 ```
 
 默认行为：
 
 - `report_to=tensorboard`
-- checkpoint 输出到 `outputs/training/droid_full`
-- TensorBoard 日志输出到 `outputs/training/droid_full/tensorboard`
+- checkpoint 输出到 `outputs/train/<日期>/HH-MM-SS-droid-full`
+- TensorBoard 日志输出到对应 run 下的 `tensorboard/`
 - `save_lora_only=false`
 - deepspeed 配置：`zero2_offload`
 
@@ -123,7 +119,7 @@ bash /home/zqy/ws/dreamzero/scripts/train/droid_training_full_finetune.sh
 例如：
 
 ```bash
-tail -f /home/zqy/ws/dreamzero/outputs/training/droid_lora/loss_log.jsonl
+tail -f "$(find /home/zqy/ws/dreamzero/outputs/train -path '*-droid-lora/loss_log.jsonl' | sort | tail -n 1)"
 ```
 
 如果当前 run 在别的磁盘目录，也可以直接看那个目录下的 `loss_log.jsonl`。
@@ -133,7 +129,7 @@ tail -f /home/zqy/ws/dreamzero/outputs/training/droid_lora/loss_log.jsonl
 脚本默认已经开启 `report_to=tensorboard`，直接启动：
 
 ```bash
-tensorboard --logdir /home/zqy/ws/dreamzero/outputs/training --port 6006
+tensorboard --logdir /home/zqy/ws/dreamzero/outputs/train --port 6006
 ```
 
 浏览器里打开：
@@ -182,27 +178,29 @@ pkill -TERM -f "output_dir=/path/to/that/run"
 推荐统一放到：
 
 ```text
-/home/zqy/ws/dreamzero/outputs/training/
+/home/zqy/ws/dreamzero/outputs/train/
 ```
 
 建议结构：
 
-- `outputs/training/droid_lora`
-- `outputs/training/droid_full`
-- `outputs/tensorboard/<run_name>`
+- `outputs/train/2026-03-27/11-05-00-droid-lora`
+- `outputs/train/2026-03-27/11-08-42-droid-full`
+- `outputs/train/latest`
+- `outputs/train/latest_droid_lora`
+- `outputs/train/latest_droid_full`
 
 ## 8. 常见监控命令
 
 看最新 loss：
 
 ```bash
-tail -n 20 /home/zqy/ws/dreamzero/outputs/training/droid_lora/loss_log.jsonl
+tail -n 20 "$(find /home/zqy/ws/dreamzero/outputs/train -path '*-droid-lora/loss_log.jsonl' | sort | tail -n 1)"
 ```
 
 看 checkpoint：
 
 ```bash
-find /home/zqy/ws/dreamzero/outputs/training/droid_lora -maxdepth 1 -type d -name 'checkpoint-*'
+find "$(find /home/zqy/ws/dreamzero/outputs/train -type d -name '*-droid-lora' | sort | tail -n 1)" -maxdepth 1 -type d -name 'checkpoint-*'
 ```
 
 看 GPU：

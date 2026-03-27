@@ -32,6 +32,8 @@ if [ ! -d "$DREAMZERO_ROOT/groot" ]; then
     echo "ERROR: No groot/ under $DREAMZERO_ROOT. Set DREAMZERO_ROOT to the dreamzero repo root that contains groot/."
     exit 1
 fi
+source "$DREAMZERO_ROOT/scripts/lib/output_layout.sh"
+DREAMZERO_OUTPUT_ROOT="$(dz_default_output_root "$DREAMZERO_ROOT")"
 
 # ============ USER CONFIGURATION ============
 DROID_DATA_ROOT=${DROID_DATA_ROOT:-"$DREAMZERO_ROOT/data/droid_lerobot"}
@@ -44,7 +46,7 @@ fi
 # Resume from 100k to 200k: use this same OUTPUT_DIR and run this script with max_steps=200000.
 # If the 100k run completed (saved final model), the code will see config.json and skip training.
 # To force resume: remove config.json from OUTPUT_DIR so the latest checkpoint-* is used, then run.
-OUTPUT_DIR=${OUTPUT_DIR:-"$DREAMZERO_ROOT/checkpoints/dreamzero_droid_wan21_full_finetune"}
+OUTPUT_DIR=${OUTPUT_DIR:-"$(dz_default_train_dir "$DREAMZERO_OUTPUT_ROOT" "droid" "full_wan21")"}
 
 NUM_GPUS=${NUM_GPUS:-4}
 PER_DEVICE_BS=${PER_DEVICE_BS:-1}
@@ -92,6 +94,9 @@ else
     echo "Using: $(command -v python3)"
 fi
 cd "$DREAMZERO_ROOT"
+mkdir -p "$OUTPUT_DIR" "$DREAMZERO_OUTPUT_ROOT/train"
+ln -sfn "$OUTPUT_DIR" "$DREAMZERO_OUTPUT_ROOT/train/latest"
+ln -sfn "$OUTPUT_DIR" "$DREAMZERO_OUTPUT_ROOT/train/latest_droid_full_wan21"
 
 # Full fine-tune: train_architecture=full, save_lora_only=false, ZeRO-2 (+ optional CPU offload)
 DEEPSPEED_CFG=${DEEPSPEED_CFG:-zero2_offload}

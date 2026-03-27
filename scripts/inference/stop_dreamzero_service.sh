@@ -4,7 +4,8 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 OUTPUT_ROOT="${OUTPUT_ROOT:-$ROOT_DIR/outputs}"
 PORT="${PORT:-5999}"
-LOG_DIR="${LOG_DIR:-$OUTPUT_ROOT/logs}"
+RUN_DIR_LINK="${RUN_DIR_LINK:-$OUTPUT_ROOT/inference/latest}"
+LOG_DIR="${LOG_DIR:-$RUN_DIR_LINK}"
 PID_FILE="$LOG_DIR/dreamzero_service_port_${PORT}.pid"
 SESSION_FILE="$LOG_DIR/dreamzero_service_port_${PORT}.screen"
 

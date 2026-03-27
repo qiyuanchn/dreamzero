@@ -11,7 +11,8 @@ export HYDRA_FULL_ERROR=1
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 DREAMZERO_ROOT=${DREAMZERO_ROOT:-"$REPO_ROOT"}
-DREAMZERO_OUTPUT_ROOT=${DREAMZERO_OUTPUT_ROOT:-"$DREAMZERO_ROOT/outputs"}
+source "$REPO_ROOT/scripts/lib/output_layout.sh"
+DREAMZERO_OUTPUT_ROOT="$(dz_default_output_root "$DREAMZERO_ROOT")"
 
 resolve_data_root() {
     local candidate="$1"
@@ -36,7 +37,7 @@ if [ -d "/data2/zqy/datasets--GEAR-Dreams--DreamZero-DROID-Data" ]; then
 fi
 
 DROID_DATA_ROOT=${DROID_DATA_ROOT:-"$default_data_root"}
-OUTPUT_DIR=${OUTPUT_DIR:-"$DREAMZERO_OUTPUT_ROOT/training/droid_full"}
+OUTPUT_DIR=${OUTPUT_DIR:-"$(dz_default_train_dir "$DREAMZERO_OUTPUT_ROOT" "droid" "full")"}
 TB_LOGDIR=${TB_LOGDIR:-"$OUTPUT_DIR/tensorboard"}
 REPORT_TO=${REPORT_TO:-tensorboard}
 NUM_GPUS=${NUM_GPUS:-4}
@@ -80,6 +81,9 @@ if [ ! -d "$TOKENIZER_DIR" ] || [ -z "$(ls -A "$TOKENIZER_DIR" 2>/dev/null)" ]; 
 fi
 
 mkdir -p "$OUTPUT_DIR" "$TB_LOGDIR"
+mkdir -p "$DREAMZERO_OUTPUT_ROOT/train"
+ln -sfn "$OUTPUT_DIR" "$DREAMZERO_OUTPUT_ROOT/train/latest"
+ln -sfn "$OUTPUT_DIR" "$DREAMZERO_OUTPUT_ROOT/train/latest_droid_full"
 cd "$DREAMZERO_ROOT"
 
 exec "$PYTHON_BIN" -m torch.distributed.run --nproc_per_node "$NUM_GPUS" --standalone \
