@@ -111,6 +111,10 @@ export CUDA_VISIBLE_DEVICES="$CUDA_DEVICE"
 export ATTENTION_BACKEND="TE"
 export HYDRA_FULL_ERROR=1
 
+if ! command -v trtexec >/dev/null 2>&1 && [[ ! -x /opt/tensorrt/bin/trtexec ]]; then
+    echo "Warning: trtexec not found. Falling back to TensorRT Python API builder." >&2
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
@@ -129,14 +133,16 @@ fi
 torchrun \
     --standalone \
     --nproc_per_node=1 \
-    "${REPO_ROOT}/scripts/inference/build_trt_engine_droid.py" \
+    "${REPO_ROOT}/scripts/inference/build_trt_engine.py" \
     "${PYTHON_ARGS[@]}"
 
 echo "=========================================="
 echo "Engine built successfully: $ENGINE_PATH"
 echo ""
 echo "Run inference with:"
+echo "  export LOAD_TRT_ENGINE=${ENGINE_PATH}"
+echo "  export TRT_MODEL_TYPE=ar_1.3B_droid"
 echo "  CUDA_VISIBLE_DEVICES=0,1 python -m torch.distributed.run --standalone --nproc_per_node=2 \\"
 echo "      socket_test_optimized_AR.py --port 5000 --enable-dit-cache \\"
-echo "      --model-path ${MODEL_PATH} --tensorrt ${TENSORRT_PRECISION}"
+echo "      --model-path ${MODEL_PATH}"
 echo "=========================================="

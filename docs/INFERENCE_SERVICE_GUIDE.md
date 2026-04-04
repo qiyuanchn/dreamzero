@@ -139,10 +139,63 @@ bash /home/zqy/ws/dreamzero/scripts/inference/start_dreamzero_service.sh
 默认行为：
 - 后台用 `screen` 托管服务
 - 默认开启 `ENABLE_TENSORRT=true`
+- 如果 `MODEL_PATH/tensorrt/wan/WanModel_<precision>.trt` 存在，启动脚本会自动设置 `LOAD_TRT_ENGINE`
 - 默认关闭 `reset` 时视频保存：`DREAMZERO_SAVE_RESET_VIDEO=0`
 - 日志写到对应 run 目录里，例如：`outputs/inference/<日期>/HH-MM-SS-<CHECKPOINT_NAME>/dreamzero_service_port_<PORT>.log`
 - 生成视频写到：`outputs/inference/<日期>/HH-MM-SS-<CHECKPOINT_NAME>/`
 - 同时会更新软链接：`outputs/inference/latest`
+
+### 4.3 构建并加载 TensorRT engine
+
+先构建 engine：
+
+```bash
+source /home/zqy/miniconda3/etc/profile.d/conda.sh
+conda activate dreamzero
+cd /home/zqy/ws/dreamzero
+
+bash scripts/inference/build_trt_engine.sh \
+  --model-path /home/zqy/ws/dreamzero/outputs/train/2026-03-26/23-21-38-droid-lora/checkpoint-2000 \
+  --tensorrt nvfp4 \
+  --dataset-path /home/zqy/ws/dreamzero/data/droid_lerobot \
+  --cuda-device 6
+```
+
+默认输出：
+- `MODEL_PATH/tensorrt/wan/WanModel_nvfp4.trt`
+
+构建完成后，启动服务有两种方式：
+
+1. 自动发现 engine：
+
+```bash
+CUDA_VISIBLE_DEVICES=6,7 \
+PORT=6007 \
+MODEL_PATH=/home/zqy/ws/dreamzero/outputs/train/2026-03-26/23-21-38-droid-lora/checkpoint-2000 \
+TENSORRT_PRECISION=nvfp4 \
+bash scripts/inference/start_dreamzero_service.sh
+```
+
+2. 显式指定 engine：
+
+```bash
+CUDA_VISIBLE_DEVICES=6,7 \
+PORT=6007 \
+MODEL_PATH=/home/zqy/ws/dreamzero/outputs/train/2026-03-26/23-21-38-droid-lora/checkpoint-2000 \
+LOAD_TRT_ENGINE=/home/zqy/ws/dreamzero/outputs/train/2026-03-26/23-21-38-droid-lora/checkpoint-2000/tensorrt/wan/WanModel_nvfp4.trt \
+TRT_MODEL_TYPE=ar_1.3B_droid \
+bash scripts/inference/start_dreamzero_service.sh
+```
+
+建议：
+- 当前这条 `wan13 / 1.3B / action_horizon=24` DreamZero-DROID 路线使用 `TRT_MODEL_TYPE=ar_1.3B_droid`
+- 如果只是先验证链路，`fp16` 最稳
+- 如果追求更强压缩，再试 `nvfp4` / `fp8`
+- `NUM_INFERENCE_STEPS=<N>`: 控制总 scheduler step，默认 `16`
+- `NUM_DIT_STEPS=<N>`: 控制真正执行 DiT forward 的步数，默认 `8`
+- `PREWARM_ON_START=1`: 服务启动后自动打一轮本地预热请求
+- `PREWARM_USE_ZERO_IMAGES=1`: 预热时使用零图像，避免真实视频加载开销
+- `PREWARM_NUM_CHUNKS=1`: 预热请求 chunk 数，默认 `1`
 
 ## 5. screen 怎么看输出
 
@@ -227,6 +280,16 @@ python test_client_AR.py --host 127.0.0.1 --port 6000 --use-zero-images --num-ch
 - 能返回 `Action shape: (24, 8)`
 - 耗时约 `9s~10s`
 
+现在客户端默认还会把每次推理耗时写到 `outputs/reports/`：
+- markdown：`outputs/reports/<timestamp>_test_client_ar_latency.md`
+- json：`outputs/reports/<timestamp>_test_client_ar_latency.json`
+
+如果这次只是临时连通性验证，不想生成报告，可以加：
+
+```bash
+python test_client_AR.py --host 127.0.0.1 --port 6000 --use-zero-images --num-chunks 1 --no-report
+```
+
 ### 7.2 真实视频验证
 
 这一步会读取：
@@ -247,6 +310,16 @@ conda activate dreamzero
 cd /home/zqy/ws/dreamzero
 PYTHONPATH=/home/zqy/ws/dreamzero \
 python test_client_AR.py --host 127.0.0.1 --port 6000 --num-chunks 3
+```
+
+如果想固定报告输出路径，可以加：
+
+```bash
+python test_client_AR.py \
+  --host 127.0.0.1 \
+  --port 6000 \
+  --num-chunks 3 \
+  --report-base /home/zqy/ws/dreamzero/outputs/reports/manual_dual_gpu_run
 ```
 
 当前实际结果：
@@ -386,6 +459,10 @@ DREAMZERO_SAVE_RESET_VIDEO=0
 - `outputs/experiments`
 - `outputs/reports`
 
+其中客户端延迟报告会落到：
+- `outputs/reports/<timestamp>_test_client_ar_latency.md`
+- `outputs/reports/<timestamp>_test_client_ar_latency.json`
+
 ## 12. 推荐工作流
 
 ### 12.1 只想确认服务能不能跑
@@ -408,6 +485,14 @@ PYTHONPATH=/home/zqy/ws/dreamzero python test_client_AR.py --host 127.0.0.1 --po
 PORT=6000 bash scripts/inference/stop_dreamzero_service.sh
 ```
 
+### 12.4 想优先测“动作返回速度”
+
+- 保持 `ENABLE_TENSORRT=true`
+- 保持 `DREAMZERO_SAVE_RESET_VIDEO=0`
+- 先用 `--use-zero-images --num-chunks 1` 排除服务和加载问题
+- 再用真实视频测 `Initial`、`Chunk 0` 和热态 chunk
+- 对比性能时把冷态和热态拆开看，不要直接混在一起取平均
+
 ## 13. 你现在最该记住的结论
 
 - `ENABLE_TENSORRT=true` 建议默认打开
@@ -415,5 +500,6 @@ PORT=6000 bash scripts/inference/stop_dreamzero_service.sh
 - 单卡：冷启动更快，热态后可稳定多 chunk
 - 双卡：冷启动更慢，热态后 chunk 更快
 - 是否关闭 `reset save video` 取决于你要不要自动留视频
+- 只想提速时，优先避免视频保存和不必要的输入落盘
 - 服务端输出是 `(24, 8)`，来自 `7维 joint + 1维 gripper`
 - 看后台输出优先用 `screen -r dreamzero_service`

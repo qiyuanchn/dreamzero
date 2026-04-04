@@ -8,6 +8,7 @@ import ctypes
 import modelopt.torch.quantization as mtq
 from typing import Dict, List, Tuple
 import shutil
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -137,6 +138,14 @@ def wan_trt_quantize_and_load_engine(
             min_shape = "kv_cache_packed:40x2x1x880x40x128"
             max_shape = "kv_cache_packed:40x2x1x8800x40x128"
             opt_shape = "kv_cache_packed:40x2x1x7920x40x128"
+        elif model_type == "ar_1.3B_droid":
+            policy.trained_model.action_head.model.forward = policy.trained_model.action_head.model._forward_inference_trt
+            dynamic_axes = {
+                "kv_cache_packed": {3: "kv_cache_len"},
+            }
+            min_shape = "kv_cache_packed:30x2x1x880x12x128"
+            max_shape = "kv_cache_packed:30x2x1x8800x12x128"
+            opt_shape = "kv_cache_packed:30x2x1x7920x12x128"
         elif model_type == "ar_5B_n6":
             policy.trained_model.action_head.model.forward = policy.trained_model.action_head.model._forward_inference_trt
             dynamic_axes = {
@@ -149,9 +158,14 @@ def wan_trt_quantize_and_load_engine(
             dynamic_axes = None
 
         if cfg.quantize_dtype == "nvfp4":
-            export_to_onnx_fp4(policy.trained_model.action_head.model, test_inputs, onnx_path, dynamic_axes=dynamic_axes)
+            exported_path = export_to_onnx_fp4(
+                policy.trained_model.action_head.model,
+                test_inputs,
+                onnx_path,
+                dynamic_axes=dynamic_axes,
+            )
         else:
-            export_to_onnx(
+            exported_path = export_to_onnx(
                 policy.trained_model.action_head.model,
                 test_inputs,
                 onnx_path,
@@ -160,7 +174,12 @@ def wan_trt_quantize_and_load_engine(
                 dynamic_axes=dynamic_axes,
             )
 
-        build_tensorrt_engine(onnx_path, engine_path, min_shape, max_shape, opt_shape)
+        if exported_path is None or not os.path.exists(exported_path):
+            raise RuntimeError(f"ONNX export failed for {onnx_path}")
+
+        built_engine = build_tensorrt_engine(onnx_path, engine_path, min_shape, max_shape, opt_shape)
+        if built_engine is None or not os.path.exists(built_engine):
+            raise RuntimeError(f"TensorRT engine build failed for {engine_path}")
 
     trt_wan_model = load_tensorrt_engine(engine_path, model_type=model_type)
     policy.trained_model.action_head.model = trt_wan_model
@@ -183,6 +202,7 @@ def export_to_onnx_fp4(model, test_inputs, onnx_save_path, dynamic_axes=None):
         with open(file_path, "wb") as f:
             f.write(file_bytes)
         print(f"exported onnx to {file_path}")
+    return onnx_save_path
 
 
 def export_to_onnx(
@@ -198,7 +218,7 @@ def export_to_onnx(
         return export_to_onnx_5B(pytorch_model, test_inputs, onnx_path, dynamic_axes)
     elif model_type == "14B":
         return export_to_onnx_14B(pytorch_model, test_inputs, onnx_path, dynamic_axes)
-    elif model_type == "ar_14B" or model_type == "ar_14B_droid":
+    elif model_type == "ar_14B" or model_type == "ar_14B_droid" or model_type == "ar_1.3B_droid":
         return export_to_onnx_ar_14B(pytorch_model, test_inputs, onnx_path, dynamic_axes)
     else:
         raise ValueError(f"Model type {model_type} not supported")
@@ -336,9 +356,115 @@ def export_to_onnx_14B(pytorch_model, test_inputs, onnx_path="tensorrt/wan_model
         return None
 
 
+def _parse_shape_arg(shape_arg: str | None) -> dict[str, tuple[int, ...]]:
+    if not shape_arg:
+        return {}
+    parsed: dict[str, tuple[int, ...]] = {}
+    for item in shape_arg.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        name, dims = item.split(":", 1)
+        parsed[name] = tuple(int(dim) for dim in dims.split("x"))
+    return parsed
+
+
+def _infer_trt_precision(engine_path: str) -> str:
+    name = Path(engine_path).name.lower()
+    if "nvfp4" in name:
+        return "nvfp4"
+    if "fp8" in name:
+        return "fp8"
+    return "fp16"
+
+
+def _build_tensorrt_engine_python(
+    onnx_path,
+    engine_path,
+    min_shape=None,
+    max_shape=None,
+    opt_shape=None,
+):
+    print("Building TensorRT engine with TensorRT Python API...")
+    logger = trt.Logger(trt.Logger.INFO)
+    flags = 1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH)
+    builder = trt.Builder(logger)
+    network = builder.create_network(flags)
+    parser = trt.OnnxParser(network, logger)
+    onnx_path = os.path.abspath(onnx_path)
+    onnx_dir = os.path.dirname(onnx_path)
+
+    parse_ok = False
+    if hasattr(parser, "parse_from_file"):
+        parse_ok = parser.parse_from_file(onnx_path)
+    else:
+        prev_cwd = os.getcwd()
+        try:
+            os.chdir(onnx_dir)
+            with open(onnx_path, "rb") as f:
+                onnx_bytes = f.read()
+            parse_ok = parser.parse(onnx_bytes)
+        finally:
+            os.chdir(prev_cwd)
+
+    if not parse_ok:
+        print("  ERROR: failed to parse ONNX model")
+        for i in range(parser.num_errors):
+            print(f"    {parser.get_error(i)}")
+        return None
+
+    config = builder.create_builder_config()
+    config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 64 << 30)
+    config.profiling_verbosity = trt.ProfilingVerbosity.DETAILED
+
+    precision = _infer_trt_precision(engine_path)
+    if precision == "nvfp4" and hasattr(trt.BuilderFlag, "FP4"):
+        config.set_flag(trt.BuilderFlag.FP4)
+        config.set_flag(trt.BuilderFlag.FP16)
+    elif precision == "fp8" and hasattr(trt.BuilderFlag, "FP8"):
+        config.set_flag(trt.BuilderFlag.FP8)
+        config.set_flag(trt.BuilderFlag.FP16)
+    else:
+        config.set_flag(trt.BuilderFlag.FP16)
+    if precision != "fp16" and hasattr(trt.BuilderFlag, "BF16"):
+        config.set_flag(trt.BuilderFlag.BF16)
+
+    min_shapes = _parse_shape_arg(min_shape)
+    max_shapes = _parse_shape_arg(max_shape)
+    opt_shapes = _parse_shape_arg(opt_shape)
+
+    if min_shapes or max_shapes or opt_shapes:
+        profile = builder.create_optimization_profile()
+        for idx in range(network.num_inputs):
+            tensor = network.get_input(idx)
+            static_shape = tuple(int(dim) for dim in tensor.shape)
+            if tensor.name in min_shapes:
+                profile.set_shape(
+                    tensor.name,
+                    min_shapes[tensor.name],
+                    opt_shapes.get(tensor.name, min_shapes[tensor.name]),
+                    max_shapes.get(tensor.name, min_shapes[tensor.name]),
+                )
+            elif any(dim == -1 for dim in static_shape):
+                print(f"  ERROR: dynamic input '{tensor.name}' is missing shape profile")
+                return None
+        config.add_optimization_profile(profile)
+
+    print(f"  Serializing engine to: {engine_path}")
+    serialized = builder.build_serialized_network(network, config)
+    if serialized is None:
+        print("  ERROR: TensorRT Python API failed to build serialized engine")
+        return None
+
+    with open(engine_path, "wb") as f:
+        f.write(serialized)
+    print(f"  TensorRT engine built successfully: {engine_path}")
+    return engine_path
+
+
 def build_tensorrt_engine(onnx_path, engine_path="tensorrt/wan_model.trt", min_shape=None, max_shape=None, opt_shape=None):
-    """Build TensorRT engine from ONNX using trtexec"""
-    print("Building TensorRT engine with trtexec...")
+    """Build TensorRT engine from ONNX using trtexec or TensorRT Python API."""
+    print("Building TensorRT engine from ONNX...")
 
     if not os.path.exists(onnx_path):
         print(f"  ERROR: ONNX file not found: {onnx_path}")
@@ -347,8 +473,18 @@ def build_tensorrt_engine(onnx_path, engine_path="tensorrt/wan_model.trt", min_s
     # Create directory if it doesn't exist
     os.makedirs(os.path.dirname(engine_path), exist_ok=True)
 
-    # Build engine using trtexec (much faster than torch_tensorrt)
+    # Build engine using trtexec when available; otherwise fall back to the
+    # TensorRT Python API so the workflow can still run in user-space installs.
     trtexec_bin = shutil.which("trtexec") or "/opt/tensorrt/bin/trtexec"
+    if not os.path.exists(trtexec_bin):
+        return _build_tensorrt_engine_python(
+            onnx_path=onnx_path,
+            engine_path=engine_path,
+            min_shape=min_shape,
+            max_shape=max_shape,
+            opt_shape=opt_shape,
+        )
+
     cmd = [
         trtexec_bin,
         f"--onnx={onnx_path}",
@@ -728,7 +864,7 @@ def load_tensorrt_engine(engine_path="tensorrt/wan_model.trt", model_type="5B"):
         trt_inference = WanTrtModelAr5B(engine_path)
     elif model_type == "14B":
         trt_inference = WanTrtModel14B(engine_path)
-    elif model_type == "ar_14B" or model_type == "ar_14B_droid":
+    elif model_type == "ar_14B" or model_type == "ar_14B_droid" or model_type == "ar_1.3B_droid":
         trt_inference = WanTrtModelAr14B(engine_path)
     else:
         raise ValueError(f"Model type {model_type} not supported")
@@ -848,5 +984,26 @@ def create_wan_test_inputs(policy, device="cuda", model_type="5B"):
         kv_cache_packed = torch.stack(kv_cache, dim=0)
         crossattn_packed = torch.stack(crossattn_k_cache, dim=0)
         return (x, timestep, context, kv_cache_packed, y, clip_feature, action, timestep_action, state)
+    elif model_type == "ar_1.3B_droid":
+        clip_feature = torch.randn(1, 257, 1280, dtype=dtype, device=device)
+        y = torch.randn(1, 20, 2, 44, 80, dtype=dtype, device=device)
+        timestep_action = torch.randn(1, 24, dtype=dtype, device=device)
+        x = torch.randn(1, 16, 2, 44, 80, dtype=dtype, device=device)
+        timestep = torch.randn(1, 2, dtype=dtype, device=device)
+        context = torch.randn(1, 512, 4096, dtype=dtype, device=device)
+        action = torch.randn(1, 24, 32, dtype=dtype, device=device)
+        state = torch.randn(1, 1, 64, dtype=dtype, device=device)
 
+        num_heads = 12
+        head_dim = 1536 // num_heads
+        num_layers = 30
+        B = 1
 
+        kv_cache = []
+        for _ in range(num_layers):
+            kv_cache.append(
+                torch.zeros([2, B, 9 * 880, num_heads, head_dim], dtype=dtype, device=device)
+            )
+
+        kv_cache_packed = torch.stack(kv_cache, dim=0)
+        return (x, timestep, context, kv_cache_packed, y, clip_feature, action, timestep_action, state)

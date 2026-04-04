@@ -48,8 +48,14 @@ from groot.control.tensorrt_utils import (
     create_wan_test_inputs,
 )
 
-# DreamZero-DROID uses the ar_14B_droid model type in tensorrt_utils.
-_MODEL_TYPE = "ar_14B_droid"
+def _resolve_trt_model_type(policy) -> str:
+    model = policy.trained_model.action_head.model
+    num_heads = getattr(model, "num_heads", None)
+    num_layers = len(getattr(model, "blocks", []))
+    action_horizon = policy.trained_model.action_head.action_horizon
+    if num_heads == 12 and num_layers == 30 and action_horizon == 24:
+        return "ar_1.3B_droid"
+    return "ar_14B_droid"
 
 
 def _init_single_gpu_mesh():
@@ -75,7 +81,7 @@ def _make_dummy_forward_loop():
     """
     def forward_loop(model):
         trt_forward = getattr(model, "_forward_inference_trt_droid", model.forward)
-        test_inputs = create_wan_test_inputs(None, device="cuda", model_type=_MODEL_TYPE)
+        test_inputs = create_wan_test_inputs(None, device="cuda", model_type="ar_1.3B_droid")
         for _ in range(16):
             with torch.no_grad():
                 trt_forward(*test_inputs)
@@ -209,6 +215,9 @@ def main():
         device_mesh=device_mesh,
     )
 
+    model_type = _resolve_trt_model_type(policy)
+    logger.info("Resolved TRT model type        : %s", model_type)
+
     # Build calibration forward loop — prefer real data for quantized precisions.
     if args.dataset_path is not None:
         forward_loop = _make_dataset_forward_loop(
@@ -232,7 +241,7 @@ def main():
         cfg=cfg,
         onnx_path=onnx_path,
         engine_path=engine_path,
-        model_type=_MODEL_TYPE,
+        model_type=model_type,
         forward_loop=forward_loop,
     )
 

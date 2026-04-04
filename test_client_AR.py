@@ -28,6 +28,8 @@ Usage:
 """
 
 import argparse
+import datetime
+import json
 import logging
 import os
 import time
@@ -51,6 +53,21 @@ CAMERA_FILES = {
 # Frame schedule constants (matching debug_inference.py)
 RELATIVE_OFFSETS = [-23, -16, -8, 0]
 ACTION_HORIZON = 24
+
+
+def _repo_root() -> str:
+    return os.path.dirname(__file__)
+
+
+def _default_output_root() -> str:
+    return os.getenv("DREAMZERO_OUTPUT_ROOT", os.path.join(_repo_root(), "outputs"))
+
+
+def _default_report_base() -> str:
+    report_dir = os.path.join(_default_output_root(), "reports")
+    os.makedirs(report_dir, exist_ok=True)
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    return os.path.join(report_dir, f"{timestamp}_test_client_ar_latency")
 
 
 def load_all_frames(video_path: str) -> np.ndarray:
@@ -179,12 +196,82 @@ def _make_zero_observation(
     return obs
 
 
+def _summarize_actions(actions: np.ndarray) -> dict:
+    return {
+        "shape": list(actions.shape),
+        "min": float(actions.min()),
+        "max": float(actions.max()),
+    }
+
+
+def _write_latency_report(report_base: str, report: dict) -> tuple[str, str]:
+    markdown_path = f"{report_base}.md"
+    json_path = f"{report_base}.json"
+
+    lines = [
+        "# DreamZero Test Client Latency Report",
+        "",
+        f"Date: {report['date']}",
+        "",
+        "## Run Info",
+        "",
+        f"- host: `{report['host']}`",
+        f"- port: `{report['port']}`",
+        f"- mode: `{report['mode']}`",
+        f"- session_id: `{report['session_id']}`",
+        f"- prompt: `{report['prompt']}`",
+        f"- total_frames_available: `{report['total_frames_available']}`",
+        f"- reset_status: `{report['reset_status']}`",
+        "",
+        "## Latency",
+        "",
+        "| Step | Frames | Time | Action Shape | Action Range |",
+        "| --- | --- | ---: | --- | --- |",
+    ]
+
+    for item in report["steps"]:
+        lines.append(
+            "| "
+            f"{item['name']} | "
+            f"`{item['frame_indices']}` | "
+            f"{item['latency_seconds']:.2f}s | "
+            f"`{tuple(item['action']['shape'])}` | "
+            f"[{item['action']['min']:.4f}, {item['action']['max']:.4f}] |"
+        )
+
+    summary = report["summary"]
+    lines.extend(
+        [
+            "",
+            "## Summary",
+            "",
+            f"- total_infer_calls: `{summary['total_infer_calls']}`",
+            f"- total_infer_time: `{summary['total_infer_time_seconds']:.2f}s`",
+            f"- avg_infer_time: `{summary['avg_infer_time_seconds']:.2f}s`",
+            f"- hottest_step: `{summary['slowest_step_name']}` = `{summary['slowest_step_seconds']:.2f}s`",
+        ]
+    )
+
+    if summary["avg_hot_chunk_time_seconds"] is not None:
+        lines.append(
+            f"- avg_hot_chunk_time: `{summary['avg_hot_chunk_time_seconds']:.2f}s`"
+        )
+
+    with open(markdown_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+    with open(json_path, "w", encoding="utf-8") as f:
+        json.dump(report, f, indent=2, ensure_ascii=False)
+        f.write("\n")
+    return markdown_path, json_path
+
+
 def test_ar_droid_policy_server(
     host: str = "localhost",
     port: int = 8000,
     num_chunks: int = 15,
     prompt: str = "Move the pan forward and use the brush in the middle of the plates to brush the inside of the pan",
     use_zero_images: bool = False,
+    report_base: str | None = None,
 ):
     """Test the AR_droid policy server with roboarena interface.
 
@@ -219,6 +306,10 @@ def test_ar_droid_policy_server(
     session_id = str(uuid.uuid4())
     logging.info(f"Session ID: {session_id}")
 
+    report_steps: list[dict] = []
+    total_frames_available: int | None = None
+    reset_status = "not_sent"
+
     # ── Zero-image fallback mode ──────────────────────────────────────
     if use_zero_images:
         logging.info("Using ZERO dummy images (legacy mode)")
@@ -229,17 +320,37 @@ def test_ar_droid_policy_server(
             actions = client.infer(obs)
             dt = time.time() - t0
             _log_action(actions, dt)
+            report_steps.append(
+                {
+                    "name": f"Chunk {i}",
+                    "frame_indices": [],
+                    "latency_seconds": dt,
+                    "action": _summarize_actions(actions),
+                }
+            )
 
         logging.info("Sending reset...")
         client.reset({})
+        reset_status = "success"
         logging.info("Done (zero-image mode).")
-        return
+        return _finalize_report(
+            report_base=report_base,
+            host=host,
+            port=port,
+            prompt=prompt,
+            mode="zero-image",
+            session_id=session_id,
+            total_frames_available=total_frames_available,
+            reset_status=reset_status,
+            report_steps=report_steps,
+        )
 
     # ── Real video frame mode ─────────────────────────────────────────
     logging.info("Loading real video frames from debug_image/ directory")
     camera_frames = load_camera_frames()
 
     total_frames = min(v.shape[0] for v in camera_frames.values())
+    total_frames_available = total_frames
     logging.info(f"Total frames available: {total_frames}")
 
     # Build frame schedule
@@ -257,6 +368,14 @@ def test_ar_droid_policy_server(
     actions = client.infer(obs)
     dt = time.time() - t0
     _log_action(actions, dt)
+    report_steps.append(
+        {
+            "name": "Initial",
+            "frame_indices": [0],
+            "latency_seconds": dt,
+            "action": _summarize_actions(actions),
+        }
+    )
 
     # Subsequent chunks: send 4 frames at a time
     for chunk_idx, frame_indices in enumerate(chunks):
@@ -266,12 +385,87 @@ def test_ar_droid_policy_server(
         actions = client.infer(obs)
         dt = time.time() - t0
         _log_action(actions, dt)
+        report_steps.append(
+            {
+                "name": f"Chunk {chunk_idx}",
+                "frame_indices": frame_indices,
+                "latency_seconds": dt,
+                "action": _summarize_actions(actions),
+            }
+        )
 
     # Reset triggers video save on the server
     logging.info("Sending reset to save video...")
     client.reset({})
+    reset_status = "success"
 
     logging.info("Done.")
+    return _finalize_report(
+        report_base=report_base,
+        host=host,
+        port=port,
+        prompt=prompt,
+        mode="real-video",
+        session_id=session_id,
+        total_frames_available=total_frames_available,
+        reset_status=reset_status,
+        report_steps=report_steps,
+    )
+
+
+def _finalize_report(
+    report_base: str | None,
+    host: str,
+    port: int,
+    prompt: str,
+    mode: str,
+    session_id: str,
+    total_frames_available: int | None,
+    reset_status: str,
+    report_steps: list[dict],
+) -> tuple[str, str] | None:
+    if not report_base:
+        return None
+
+    total_infer_time = sum(step["latency_seconds"] for step in report_steps)
+    avg_infer_time = total_infer_time / len(report_steps) if report_steps else 0.0
+    slowest_step = (
+        max(report_steps, key=lambda step: step["latency_seconds"])
+        if report_steps
+        else {"name": "N/A", "latency_seconds": 0.0}
+    )
+    hot_chunks = [
+        step["latency_seconds"]
+        for step in report_steps
+        if step["name"].startswith("Chunk ") and step["name"] != "Chunk 0"
+    ]
+    avg_hot_chunk_time = (
+        sum(hot_chunks) / len(hot_chunks) if hot_chunks else None
+    )
+
+    report = {
+        "date": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "host": host,
+        "port": port,
+        "mode": mode,
+        "session_id": session_id,
+        "prompt": prompt,
+        "total_frames_available": total_frames_available,
+        "reset_status": reset_status,
+        "steps": report_steps,
+        "summary": {
+            "total_infer_calls": len(report_steps),
+            "total_infer_time_seconds": total_infer_time,
+            "avg_infer_time_seconds": avg_infer_time,
+            "slowest_step_name": slowest_step["name"],
+            "slowest_step_seconds": slowest_step["latency_seconds"],
+            "avg_hot_chunk_time_seconds": avg_hot_chunk_time,
+        },
+    }
+    markdown_path, json_path = _write_latency_report(report_base, report)
+    logging.info("Latency report written to %s", markdown_path)
+    logging.info("Latency report JSON written to %s", json_path)
+    return markdown_path, json_path
 
 
 def _log_action(actions: np.ndarray, dt: float) -> None:
@@ -310,6 +504,19 @@ def main():
         action="store_true",
         help="Use zero dummy images instead of real video frames (legacy mode)",
     )
+    parser.add_argument(
+        "--report-base",
+        default=_default_report_base(),
+        help=(
+            "Base path for latency report outputs without extension. "
+            "Defaults to outputs/reports/<timestamp>_test_client_ar_latency"
+        ),
+    )
+    parser.add_argument(
+        "--no-report",
+        action="store_true",
+        help="Disable writing latency reports to outputs/reports",
+    )
 
     args = parser.parse_args()
 
@@ -324,6 +531,7 @@ def main():
         num_chunks=args.num_chunks,
         prompt=args.prompt,
         use_zero_images=args.use_zero_images,
+        report_base=None if args.no_report else args.report_base,
     )
 
 
