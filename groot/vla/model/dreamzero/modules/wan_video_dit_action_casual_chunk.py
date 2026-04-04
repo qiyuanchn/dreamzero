@@ -1089,6 +1089,7 @@ class CausalWanSelfAttention(nn.Module):
 
         # output
         x = x.flatten(2)
+        x = x.to(self.o.weight.dtype)
         x = self.o(x)
         return x, updated_kv_cache
 
@@ -1767,8 +1768,12 @@ class CausalWanModel(ModelMixin, ConfigMixin):
 
         # time embeddings: expand to exactly seq_len so e matches x (5B: frame_seqlen=50, 1 frame -> 50 tokens)
         if F <= seq_len:
+            f_int = int(F)
             repeat = (seq_len + F - 1) // F
-            timestep = timestep.repeat_interleave(repeat, dim=1)[:, :seq_len]
+            indices = (
+                torch.arange(seq_len, device=timestep.device, dtype=torch.long) // repeat
+            ).clamp(max=f_int - 1)
+            timestep = timestep[:, indices]
         else:
             indices = torch.linspace(0, F - 1, seq_len, device=timestep.device, dtype=torch.long)
             timestep = timestep[:, indices]

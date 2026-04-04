@@ -787,6 +787,8 @@ def main(args: Args) -> None:
         device="cuda" if torch.cuda.is_available() else "cpu",
         device_mesh=device_mesh,
     )
+    if args.max_chunk_size is not None:
+        policy.trained_model.action_head.set_inference_max_chunk_size(args.max_chunk_size)
 
     # Create server for all ranks - rank 0 handles websocket, others run worker loop
     hostname = socket.gethostname()

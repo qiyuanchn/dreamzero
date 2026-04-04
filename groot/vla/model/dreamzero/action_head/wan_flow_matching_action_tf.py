@@ -4,6 +4,7 @@ import time
 from pathlib import Path
 from typing import TypeAlias, cast
 import os
+import numpy as np
 
 from accelerate import load_checkpoint_and_dispatch
 
@@ -24,6 +25,40 @@ logger = logging.getLogger(__name__)
 WAN14_HF_REPO_ID = os.getenv("WAN14_HF_REPO_ID", "Wan-AI/Wan2.1-I2V-14B-480P")
 WAN13_HF_REPO_ID = os.getenv("WAN13_HF_REPO_ID", "alibaba-pai/Wan2.1-Fun-V1.1-1.3B-InP")
 WAN22_HF_REPO_ID = os.getenv("WAN22_HF_REPO_ID", "Wan-AI/Wan2.2-TI2V-5B")
+
+
+def _build_dit_step_mask(num_inference_steps: int, num_dit_steps: int) -> list[bool]:
+    if num_inference_steps <= 0:
+        raise ValueError(f"num_inference_steps must be positive, got {num_inference_steps}")
+    if num_dit_steps <= 0:
+        raise ValueError(f"num_dit_steps must be positive, got {num_dit_steps}")
+    if num_dit_steps >= num_inference_steps:
+        return [True] * num_inference_steps
+
+    legacy_masks = {
+        (16, 5): [True, True, True, False, False, False, False, True, False, False, False, False, True, False, False, False],
+        (16, 6): [True, True, False, False, False, True, False, False, False, False, True, False, False, False, True, True],
+        (16, 7): [True, True, True, False, False, False, True, False, False, False, True, False, False, False, True, True],
+        (16, 8): [True, True, True, False, False, False, True, False, False, False, True, False, False, True, True, True],
+    }
+    if (num_inference_steps, num_dit_steps) in legacy_masks:
+        return legacy_masks[(num_inference_steps, num_dit_steps)]
+
+    selected_indices = []
+    for idx in np.linspace(0, num_inference_steps - 1, num=num_dit_steps):
+        rounded_idx = int(round(float(idx)))
+        if rounded_idx not in selected_indices:
+            selected_indices.append(rounded_idx)
+
+    selected_set = set(selected_indices)
+    candidate_idx = 0
+    while len(selected_set) < num_dit_steps and candidate_idx < num_inference_steps:
+        selected_set.add(candidate_idx)
+        candidate_idx += 1
+
+    mask = [index in selected_set for index in range(num_inference_steps)]
+    mask[0] = True
+    return mask
 
 
 def _find_repo_root() -> Path:
@@ -222,7 +257,7 @@ class WANPolicyHead(ActionHead):
         self.scheduler = FlowMatchScheduler(shift=5, sigma_min=0.0, extra_one_step=True)
         self.model_names = ['text_encoder']
 
-        self.num_inference_steps = 16 
+        self.num_inference_steps = int(os.getenv("NUM_INFERENCE_STEPS", "16"))
         self.seed = 1140
         self.cfg_scale = 5.0
         self.denoising_strength = 1.0
@@ -243,6 +278,7 @@ class WANPolicyHead(ActionHead):
         self.ys = None
         self.current_start_frame = 0
         self.language = None
+        self.prompt_emb_cache = None
 
         self.ip_rank = 0
         self.ip_size = 1
@@ -252,19 +288,11 @@ class WANPolicyHead(ActionHead):
         self.dynamic_cache_schedule = os.getenv("DYNAMIC_CACHE_SCHEDULE", "False").lower() == "true"
 
 
-        num_dit_steps = 8
-        if os.getenv("NUM_DIT_STEPS") is not None:
-            num_dit_steps = int(os.getenv("NUM_DIT_STEPS"))
-        if num_dit_steps == 5:
-            self.dit_step_mask = [True, True, True, False, False, False, False, True, False, False, False, False, True, False, False, False]
-        elif num_dit_steps == 6:
-            self.dit_step_mask = [True, True, False, False, False, True, False, False, False, False, True, False, False, False, True, True]
-        elif num_dit_steps == 7:
-            self.dit_step_mask = [True, True, True, False, False, False, True, False, False, False, True, False, False, False, True, True]
-        elif num_dit_steps == 8:
-            self.dit_step_mask = [True, True, True, False, False, False, True, False, False, False, True, False, False, True, True, True]
-        else:
-            self.dit_step_mask = [True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True]
+        self.num_dit_steps = int(os.getenv("NUM_DIT_STEPS", "8"))
+        self.dit_step_mask = _build_dit_step_mask(
+            num_inference_steps=self.num_inference_steps,
+            num_dit_steps=self.num_dit_steps,
+        )
         assert self.dit_step_mask[0] == True, "first step must be True"
 
         self.normalize_video = v2.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
@@ -585,6 +613,29 @@ class WANPolicyHead(ActionHead):
             )
 
         return crossattn_cache, crossattn_cache_neg
+
+    def set_inference_max_chunk_size(self, max_chunk_size: int) -> None:
+        if max_chunk_size <= 0:
+            raise ValueError(f"max_chunk_size must be positive, got {max_chunk_size}")
+
+        local_attn_size = max_chunk_size * self.num_frame_per_block + 1
+        self.model.local_attn_size = local_attn_size
+
+        for block in getattr(self.model, "blocks", []):
+            if hasattr(block, "local_attn_size"):
+                block.local_attn_size = local_attn_size
+            self_attn = getattr(block, "self_attn", None)
+            if self_attn is not None:
+                if hasattr(self_attn, "local_attn_size"):
+                    self_attn.local_attn_size = local_attn_size
+                if hasattr(self_attn, "frame_seqlen") and hasattr(self_attn, "max_attention_size"):
+                    self_attn.max_attention_size = local_attn_size * self_attn.frame_seqlen
+
+        if self.ip_rank == 0:
+            print(
+                f"Override local_attn_size for inference: "
+                f"max_chunk_size={max_chunk_size}, local_attn_size={local_attn_size}"
+            )
         
     def sample_time(self, batch_size, device, dtype):
         sample = self.beta_dist.sample([batch_size]).to(device, dtype=dtype)
@@ -906,6 +957,14 @@ class WANPolicyHead(ActionHead):
                 text_inputs.append((data["text_negative"], data["text_attention_mask_negative"]))
         return text_inputs
 
+    def _get_prompt_embeddings(self, data: BatchFeature) -> list[torch.Tensor]:
+        if self.prompt_emb_cache is None:
+            text_inputs = self._prepare_text_inputs(data)
+            self.prompt_emb_cache = [
+                self.encode_prompt(text, attention_mask) for text, attention_mask in text_inputs
+            ]
+        return self.prompt_emb_cache
+
 
     def _run_diffusion_steps(
         self,
@@ -1089,11 +1148,13 @@ class WANPolicyHead(ActionHead):
         if self.language is None:
             print("language is None, reset current_start_frame to 0")
             self.language = data["text"]
+            self.prompt_emb_cache = None
             self.current_start_frame = 0
         elif not torch.equal(self.language, data["text"]):
             print("language changed, reset current_start_frame to 0")
             self.current_start_frame = 0
             self.language = data["text"]
+            self.prompt_emb_cache = None
         elif videos.shape[2] == 1:
             print("videos.shape[2] == 1, reset current_start_frame to 0")
             self.current_start_frame = 0
@@ -1106,8 +1167,7 @@ class WANPolicyHead(ActionHead):
 
         start_text_encoder_event.record()
 
-        text_inputs = self._prepare_text_inputs(data)
-        prompt_embs = [self.encode_prompt(text, attention_mask) for text, attention_mask in text_inputs]
+        prompt_embs = self._get_prompt_embeddings(data)
 
         end_text_encoder_event.record()
         

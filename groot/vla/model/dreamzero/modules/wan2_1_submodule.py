@@ -236,6 +236,7 @@ class WanSelfAttention(nn.Module):
 
         # output
         x = x.flatten(2)
+        x = x.to(self.o.weight.dtype)
         x = self.o(x)
         return x
 
@@ -274,6 +275,7 @@ class WanT2VCrossAttention(WanSelfAttention):
 
         # output
         x = x.flatten(2)
+        x = x.to(self.o.weight.dtype)
         x = self.o(x)
         return x
 
@@ -301,6 +303,7 @@ class WanGanCrossAttention(WanSelfAttention):
 
         # output
         x = x.flatten(2)
+        x = x.to(self.o.weight.dtype)
         x = self.o(x)
         return x
 
@@ -357,6 +360,7 @@ class WanI2VCrossAttention(WanSelfAttention):
         x = x.flatten(2)
         img_x = img_x.flatten(2)
         x = x + img_x
+        x = x.to(self.o.weight.dtype)
         x = self.o(x)
         return x
 
