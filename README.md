@@ -30,6 +30,41 @@ DreamZero is a World Action Model that jointly predicts actions and videos, achi
 - [PolaRiS](https://polaris-evals.github.io/) simulation environment support
 - [Genie 3.0](https://arxiv.org/abs/2601.02078) sim environment support for DreamZero-AgiBot
 
+## Fork Updates
+
+This fork currently tracks a local DreamZero 1.3B workflow centered on DROID training and TensorRT-backed inference validation. The main updates on top of the upstream `main` branch are:
+
+- DreamZero 1.3B training support based on `alibaba-pai/Wan2.1-Fun-V1.1-1.3B-InP`
+- LoRA and full fine-tune script fixes for stable startup, dataset path resolution, and checkpoint output
+- Unified output layout under `outputs/train/...` and `outputs/inference/...`
+- TensorBoard-first monitoring, plus `loss_log.jsonl` to TensorBoard backfill support
+- Inference service launch/stop scripts, TensorRT engine build helpers, and safer service defaults
+- Updated action/inference handling for real video chunking and TRT-backed startup
+
+See the fork-specific guides for the current workflow:
+
+- [Training guide](docs/TRAINING_GUIDE.md)
+- [Inference service guide](docs/INFERENCE_SERVICE_GUIDE.md)
+
+## Local Training Notes
+
+Recent local runs were collected from `/data2/zqy/dreamzero/outputs/train` and summarized here for reproducibility. These are local verification runs rather than official benchmark claims.
+
+| Date | Run | Artifact path | Last step seen | Best / min loss seen | Notes |
+|---|---|---|---:|---:|---|
+| 2026-03-26 | DROID full fine-tune verify | `/data2/zqy/dreamzero/outputs/train/2026-03-26/21-39-35-droid-full` | 740 | 0.3313 | Early full fine-tune run with `loss_log.jsonl` exported |
+| 2026-03-26 | DROID LoRA | `/data2/zqy/dreamzero/outputs/train/2026-03-26/23-21-38-droid-lora` | 2000 | 0.1092 | Checkpoint saved at `checkpoint-2000` |
+| 2026-04-04 | DROID LoRA | `/data2/zqy/dreamzero/outputs/train/2026-04-04/10-11-15-droid-lora` | 3000 | 0.1058 | Continued convergence after the initial 2k-step run |
+| 2026-04-04 | DROID LoRA continue | `/data2/zqy/dreamzero/outputs/train/2026-04-04/10-11-15-droid-lora-continue` | 1630 | 0.1161 | Resume/continue validation run |
+| 2026-04-04 | DROID LoRA long run | `/data2/zqy/dreamzero/outputs/train/2026-04-04/22-31-42-droid-lora` | 7240 | 0.0922 | Checkpoints verified through `checkpoint-7000`; loss stayed near `0.11-0.13` late in training |
+| 2026-04-05 | Full fine-tune smoke test | `/data2/zqy/dreamzero/outputs/train/2026-04-05/full_verify_workers0_save_on_data2` | 10 | 0.4420 | Short validation run used to confirm workers=`0` and checkpoint saving on `/data2` |
+
+Practical takeaways from these runs:
+
+- LoRA training is the most mature local path so far and has been verified through at least `7000` training steps.
+- The long LoRA run reached a minimum observed loss of `0.0922`, with checkpoints written every `1000` steps up to `checkpoint-7000`.
+- Full fine-tune startup, worker configuration, and checkpoint emission have been validated with the latest script fixes, but the full route still needs longer-duration training before making performance claims.
+
 ## Testing Out DreamZero in Simulation with API
 We provide an inference script that directly evaluates a hosted DreamZero-DROID policy on [`sim_evals`](https://github.com/arhanjain/sim-evals). To test out the policy, first request access to the API via this form [link](https://forms.gle/zCj5zjDvHsoeuMXU7). Then, follow these instructions to install [`sim_evals`](https://github.com/arhanjain/sim-evals) and launch evaluation.
 
