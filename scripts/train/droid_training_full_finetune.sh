@@ -14,6 +14,11 @@ DREAMZERO_ROOT=${DREAMZERO_ROOT:-"$REPO_ROOT"}
 source "$REPO_ROOT/scripts/lib/output_layout.sh"
 DREAMZERO_OUTPUT_ROOT="$(dz_default_output_root "$DREAMZERO_ROOT")"
 
+DEFAULT_FULL_OUTPUT_ROOT="$DREAMZERO_OUTPUT_ROOT"
+if [ -d "/data2/zqy/dreamzero" ]; then
+    DEFAULT_FULL_OUTPUT_ROOT="/data2/zqy/dreamzero/outputs"
+fi
+
 resolve_data_root() {
     local candidate="$1"
     if [ -d "$candidate/data" ] && [ -d "$candidate/meta" ]; then
@@ -37,7 +42,7 @@ if [ -d "/data2/zqy/datasets--GEAR-Dreams--DreamZero-DROID-Data" ]; then
 fi
 
 DROID_DATA_ROOT=${DROID_DATA_ROOT:-"$default_data_root"}
-OUTPUT_DIR=${OUTPUT_DIR:-"$(dz_default_train_dir "$DREAMZERO_OUTPUT_ROOT" "droid" "full")"}
+OUTPUT_DIR=${OUTPUT_DIR:-"$(dz_default_train_dir "$DEFAULT_FULL_OUTPUT_ROOT" "droid" "full")"}
 TB_LOGDIR=${TB_LOGDIR:-"$OUTPUT_DIR/tensorboard"}
 REPORT_TO=${REPORT_TO:-tensorboard}
 NUM_GPUS=${NUM_GPUS:-4}
@@ -46,10 +51,20 @@ GLOBAL_BATCH_SIZE=${GLOBAL_BATCH_SIZE:-$((NUM_GPUS * PER_DEVICE_BS))}
 MAX_STEPS=${MAX_STEPS:-100000}
 SAVE_STEPS=${SAVE_STEPS:-2000}
 LOGGING_STEPS=${LOGGING_STEPS:-10}
-NUM_WORKERS=${NUM_WORKERS:-4}
+# Full fine-tuning already keeps a very large parent process alive before DataLoader workers
+# are forked. A high worker count can duplicate enough memory pressure across ranks to stall
+# or crash the run after several minutes, so keep the default conservative here.
+NUM_WORKERS=${NUM_WORKERS:-0}
 WAN_CKPT_DIR=${WAN_CKPT_DIR:-"$DREAMZERO_ROOT/checkpoints/Wan2.1-Fun-V1.1-1.3B-InP"}
 TOKENIZER_DIR=${TOKENIZER_DIR:-"$DREAMZERO_ROOT/checkpoints/umt5-xxl"}
 PYTHON_BIN=${DREAMZERO_PYTHON:-}
+
+if [ -d "/data2/zqy/dreamzero" ]; then
+    export TRITON_CACHE_DIR="${TRITON_CACHE_DIR:-/data2/zqy/dreamzero/cache/triton}"
+    export TORCHINDUCTOR_CACHE_DIR="${TORCHINDUCTOR_CACHE_DIR:-/data2/zqy/dreamzero/cache/torchinductor}"
+    export TMPDIR="${TMPDIR:-/data2/zqy/dreamzero/cache/tmp}"
+    mkdir -p "$TRITON_CACHE_DIR" "$TORCHINDUCTOR_CACHE_DIR" "$TMPDIR"
+fi
 
 if [ -z "$PYTHON_BIN" ]; then
     if [ -n "${CONDA_PREFIX:-}" ] && [ -x "${CONDA_PREFIX}/bin/python" ]; then

@@ -527,7 +527,187 @@ ln -sfn ../experiment_cfg experiment_cfg
 - 本轮新增优化报告:
   - `/home/zqy/ws/dreamzero/outputs/reports/20260402_inference_acceleration_notes.md`
 
+## 2026-04-04 真实视频端到端测速补充
+
+- 这轮测试继续只用后四张卡里的 `6,7`
+- 输入视频固定使用:
+  - `/home/zqy/ws/dreamzero/debug_image/exterior_image_1_left.mp4`
+  - `/home/zqy/ws/dreamzero/debug_image/exterior_image_2_left.mp4`
+  - `/home/zqy/ws/dreamzero/debug_image/wrist_image_left.mp4`
+- 模型路径:
+  - `/data2/zqy/dreamzero/outputs/train/2026-03-26/23-21-38-droid-lora/checkpoint-2000`
+- 这次对比报告:
+  - `/home/zqy/ws/dreamzero/outputs/reports/baseline_realvideo_2gpu.md`
+  - `/home/zqy/ws/dreamzero/outputs/reports/optimized_realvideo_2gpu_steps8_4_only.md`
+  - `/home/zqy/ws/dreamzero/outputs/reports/optimized_realvideo_2gpu_trt_fp16_steps8_4.md`
+  - `/home/zqy/ws/dreamzero/outputs/reports/20260404_realvideo_speed_study.md`
+
+### 这次实测结论
+
+- 基线:
+  - 2 卡 `6,7`
+  - `ENABLE_TENSORRT=false`
+  - `NUM_INFERENCE_STEPS=16`
+  - `NUM_DIT_STEPS=8`
+  - `--num-chunks 3`
+  - 客户端耗时:
+    - Initial `15.34s`
+    - Chunk 0 `26.14s`
+    - Chunk 1 `1.22s`
+    - Chunk 2 `0.89s`
+- 只减 steps:
+  - 2 卡 `6,7`
+  - `ENABLE_TENSORRT=false`
+  - `NUM_INFERENCE_STEPS=8`
+  - `NUM_DIT_STEPS=4`
+  - `--enable-dit-cache`
+  - 客户端耗时:
+    - Initial `13.44s`
+    - Chunk 0 `12.93s`
+    - Chunk 1 `0.87s`
+    - Chunk 2 `0.54s`
+- `fp16` TensorRT + 减 steps:
+  - 2 卡 `6,7`
+  - `LOAD_TRT_ENGINE=/data2/zqy/dreamzero/outputs/train/2026-03-26/23-21-38-droid-lora/checkpoint-2000/tensorrt/wan/WanModel_fp16.trt`
+  - `NUM_INFERENCE_STEPS=8`
+  - `NUM_DIT_STEPS=4`
+  - `--enable-dit-cache`
+  - 客户端耗时:
+    - Initial `4.52s`
+    - Chunk 0 `8.07s`
+    - Chunk 1 `0.48s`
+    - Chunk 2 `0.51s`
+
+### 当前最重要判断
+
+- 对这个 1.3B DreamZero-DROID 推理路径，4 卡不是当前优先优化方向。
+- 原因:
+  - 代码里的 `ip_size` 不是通用张量并行
+  - 当前实现本质上是把 CFG 的 cond / uncond 两路分到两个 rank 上
+  - `_exchange_predictions()` 也只实现了两路互发
+- 所以:
+  - 直接把 `ip_size <= 2` 改成 `4` 并不会自然提速
+  - 如果要真做 4 卡，需要重写这条并行交换逻辑，不能只改断言
+
+### 当前推荐
+
+- 只追求当前最快实用速度:
+  - 优先用 2 卡 `6,7`
+  - 优先用已有 `fp16` TensorRT engine
+  - `NUM_INFERENCE_STEPS=8`
+  - `NUM_DIT_STEPS=4`
+  - `DREAMZERO_SAVE_RESET_VIDEO=0`
+  - `--enable-dit-cache`
+- 如果没有对应 TRT engine:
+  - 先把 steps 降到 `8/4`
+  - 这条也能明显提速，只是没有 TRT 快
+
+## 2026-04-05 更激进真实视频测速补充
+
+- 继续只使用 `GPU 6,7`
+- 同一 checkpoint:
+  - `/data2/zqy/dreamzero/outputs/train/2026-03-26/23-21-38-droid-lora/checkpoint-2000`
+- 同一 TensorRT engine:
+  - `/data2/zqy/dreamzero/outputs/train/2026-03-26/23-21-38-droid-lora/checkpoint-2000/tensorrt/wan/WanModel_fp16.trt`
+- 真实视频输入不变:
+  - `/home/zqy/ws/dreamzero/debug_image/exterior_image_1_left.mp4`
+  - `/home/zqy/ws/dreamzero/debug_image/exterior_image_2_left.mp4`
+  - `/home/zqy/ws/dreamzero/debug_image/wrist_image_left.mp4`
+
+### 新增实测结果
+
+- `6/3 + max_chunk_size=8`:
+  - `NUM_INFERENCE_STEPS=6`
+  - `NUM_DIT_STEPS=3`
+  - `--max-chunk-size 8`
+  - `--enable-dit-cache`
+  - 耗时:
+    - Initial `3.76s`
+    - Chunk 0 `5.64s`
+    - Chunk 1 `0.43s`
+    - Chunk 2 `0.44s`
+  - 报告:
+    - `/home/zqy/ws/dreamzero/outputs/reports/optimized_realvideo_2gpu_trt_fp16_steps6_3_maxchunk8.md`
+- `4/2 + max_chunk_size=8`:
+  - `NUM_INFERENCE_STEPS=4`
+  - `NUM_DIT_STEPS=2`
+  - `--max-chunk-size 8`
+  - `--enable-dit-cache`
+  - 耗时:
+    - Initial `3.50s`
+    - Chunk 0 `3.36s`
+    - Chunk 1 `0.37s`
+    - Chunk 2 `0.37s`
+  - 报告:
+    - `/home/zqy/ws/dreamzero/outputs/reports/optimized_realvideo_2gpu_trt_fp16_steps4_2_maxchunk8.md`
+
+### 当前最新建议
+
+- 如果只追求当前最快:
+  - `GPU 6,7`
+  - `ENABLE_TENSORRT=true`
+  - `LOAD_TRT_ENGINE=.../WanModel_fp16.trt`
+  - `TRT_MODEL_TYPE=ar_1.3B_droid`
+  - `NUM_INFERENCE_STEPS=4`
+  - `NUM_DIT_STEPS=2`
+  - `--enable-dit-cache`
+  - `--max-chunk-size 8`
+  - `DREAMZERO_SAVE_RESET_VIDEO=0`
+- 如果想比 `4/2` 稍微保守一点:
+  - `NUM_INFERENCE_STEPS=6`
+  - `NUM_DIT_STEPS=3`
+  - `--max-chunk-size 8`
+
+### 可直接查看的视频产物
+
+- 在 `4/2 + max_chunk_size=8 + save video` 下，已保存一份 reset 视频:
+  - `/home/zqy/ws/dreamzero/outputs/inference/2026-04-05/optimized_realvideo_2gpu_trt_fp16_steps4_2_maxchunk8_savevideo/000000_04_05_10_08_12_n4.mp4`
+
+### 备注
+
+- `4/2` 和 `6/3` 当前已经验证:
+  - 真实视频端到端可跑
+  - reset 可保存视频
+  - 明显快于 `8/4`
+- 但还没有做系统性的视觉质量逐帧比对，因此当前结论偏“速度优先”
+
 ## 重要文档
+
+## 2026-04-05 Full 训练排查结论
+
+- 目标:
+  - 在后四卡 `4,5,6,7` 上把 `scripts/train/droid_training_full_finetune.sh` 跑通
+- 这次定位到两个独立问题:
+  - `full` 模式默认 `dataloader_num_workers=4` 时，4 个 rank 会额外 fork 出很多 DataLoader worker，full 模型父进程本身很大，容易把内存/交换区压力放大，表现为训练初始化和 shard cache 非常不稳定
+  - 训练本身跑过 10 分钟后并没有先炸在前向/反向，而是炸在 checkpoint 保存:
+    - `PytorchStreamWriter failed writing file`
+    - `OSError: [Errno 28] No space left on device`
+    - 根因是输出和 Triton/TorchInductor 缓存落在根盘 `/`，而 `/` 已接近打满
+- 已做修改:
+  - `scripts/train/droid_training_full_finetune.sh`
+  - 将 full 训练默认 `NUM_WORKERS` 从 `4` 调整为 `0`
+  - 当 `/data2/zqy/dreamzero` 存在时，full 训练默认输出目录改为 `/data2/zqy/dreamzero/outputs/...`
+  - 当 `/data2/zqy/dreamzero` 存在时，默认设置:
+    - `TRITON_CACHE_DIR=/data2/zqy/dreamzero/cache/triton`
+    - `TORCHINDUCTOR_CACHE_DIR=/data2/zqy/dreamzero/cache/torchinductor`
+    - `TMPDIR=/data2/zqy/dreamzero/cache/tmp`
+- 已验证:
+  - 四卡 `4,5,6,7`
+  - `NUM_WORKERS=0` 后，full 训练稳定跑过 10 分钟，持续推进到 `step 86`
+  - 这轮证明训练主链路可跑，日志:
+    - `/home/zqy/ws/dreamzero/outputs/logs/full_verify_workers0_120steps.log`
+  - 之后切到 `/data2` 输出目录，再跑一轮 `MAX_STEPS=12, SAVE_STEPS=10`
+  - `checkpoint-10` 已完整写出，证明保存链路已打通:
+    - `/data2/zqy/dreamzero/outputs/train/2026-04-05/full_verify_workers0_save_on_data2/checkpoint-10`
+  - 对应日志:
+    - `/home/zqy/ws/dreamzero/outputs/logs/full_verify_workers0_save_on_data2.log`
+  - 对应 loss:
+    - `step 0`: `dynamics_loss_avg=0.1789`, `action_loss_avg=0.1927`
+    - `step 10`: `loss=0.4420`, `dynamics_loss_avg=0.1254`, `action_loss_avg=0.2975`
+- 当前建议:
+  - full 训练优先使用后四卡
+  - 默认让 checkpoint 和编译缓存落到 `/data2`
+  - 如果只是想稳定开训，不要把 full 训练的 `NUM_WORKERS` 再调回 `4`
 
 - 训练说明:
   - `/home/zqy/ws/dreamzero/docs/TRAINING_GUIDE.md`
