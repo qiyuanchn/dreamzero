@@ -1,0 +1,107 @@
+#!/bin/bash
+export HYDRA_FULL_ERROR=1
+export TOKENIZERS_PARALLELISM=${TOKENIZERS_PARALLELISM:-false}
+export NO_ALBUMENTATIONS_UPDATE=${NO_ALBUMENTATIONS_UPDATE:-1}
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+DREAMZERO_ROOT=${DREAMZERO_ROOT:-"$REPO_ROOT"}
+source "$REPO_ROOT/scripts/lib/output_layout.sh"
+DREAMZERO_OUTPUT_ROOT="$(dz_default_output_root "$DREAMZERO_ROOT")"
+
+DRONE_DATA_ROOT=${DRONE_DATA_ROOT:-"$REPO_ROOT/data/drone_lerobot"}
+OUTPUT_DIR=${OUTPUT_DIR:-"$(dz_default_train_dir "$DREAMZERO_OUTPUT_ROOT" "drone" "lora")"}
+TB_LOGDIR=${TB_LOGDIR:-"$OUTPUT_DIR/tensorboard"}
+REPORT_TO=${REPORT_TO:-tensorboard}
+NUM_GPUS=${NUM_GPUS:-1}
+PER_DEVICE_BS=${PER_DEVICE_BS:-1}
+GLOBAL_BATCH_SIZE=${GLOBAL_BATCH_SIZE:-$((NUM_GPUS * PER_DEVICE_BS))}
+MAX_STEPS=${MAX_STEPS:-1000}
+SAVE_STEPS=${SAVE_STEPS:-100}
+LOGGING_STEPS=${LOGGING_STEPS:-1}
+NUM_WORKERS=${NUM_WORKERS:-0}
+SAVE_ONLY_MODEL=${SAVE_ONLY_MODEL:-true}
+RESUME_FROM_CHECKPOINT=${RESUME_FROM_CHECKPOINT:-}
+WAN_CKPT_DIR=${WAN_CKPT_DIR:-"$DREAMZERO_ROOT/checkpoints/Wan2.1-Fun-V1.1-1.3B-InP"}
+TOKENIZER_DIR=${TOKENIZER_DIR:-"$DREAMZERO_ROOT/checkpoints/umt5-xxl"}
+PYTHON_BIN=${DREAMZERO_PYTHON:-}
+
+if [ -z "$PYTHON_BIN" ]; then
+    if [ -x "/home/zqy/miniconda3/envs/dreamzero/bin/python" ]; then
+        PYTHON_BIN="/home/zqy/miniconda3/envs/dreamzero/bin/python"
+    elif [ -n "${CONDA_PREFIX:-}" ] && [ -x "${CONDA_PREFIX}/bin/python" ]; then
+        PYTHON_BIN="${CONDA_PREFIX}/bin/python"
+    else
+        PYTHON_BIN="$(command -v python3)"
+    fi
+fi
+
+if [ ! -d "$DRONE_DATA_ROOT" ]; then
+    echo "ERROR: drone dataset not found at $DRONE_DATA_ROOT"
+    exit 1
+fi
+
+if [ ! -f "$DRONE_DATA_ROOT/info.json" ] || [ ! -f "$DRONE_DATA_ROOT/modality.json" ]; then
+    echo "ERROR: dataset metadata missing in $DRONE_DATA_ROOT"
+    exit 1
+fi
+
+mkdir -p "$OUTPUT_DIR" "$TB_LOGDIR"
+mkdir -p "$DREAMZERO_OUTPUT_ROOT/train"
+ln -sfn "$OUTPUT_DIR" "$DREAMZERO_OUTPUT_ROOT/train/latest"
+ln -sfn "$OUTPUT_DIR" "$DREAMZERO_OUTPUT_ROOT/train/latest_drone_lora"
+cd "$DREAMZERO_ROOT"
+
+EXTRA_ARGS=()
+if [ -n "$RESUME_FROM_CHECKPOINT" ]; then
+    EXTRA_ARGS+=("resume_from_checkpoint=$RESUME_FROM_CHECKPOINT")
+fi
+
+exec "$PYTHON_BIN" -m torch.distributed.run --nproc_per_node "$NUM_GPUS" --standalone \
+    groot/vla/experiment/experiment.py \
+    report_to="$REPORT_TO" \
+    data=dreamzero/drone_relative \
+    wandb_project=dreamzero \
+    train_architecture=lora \
+    num_frames=33 \
+    action_horizon=24 \
+    num_views=1 \
+    model=dreamzero/vla \
+    model/dreamzero/action_head=wan_flow_matching_action_tf_wan13 \
+    model/dreamzero/transform=dreamzero_cotrain \
+    num_frame_per_block=2 \
+    num_action_per_block=24 \
+    num_state_per_block=1 \
+    seed=42 \
+    training_args.learning_rate=1e-4 \
+    training_args.deepspeed="groot/vla/configs/deepspeed/zero2.json" \
+    +training_args.logging_dir="$TB_LOGDIR" \
+    save_steps="$SAVE_STEPS" \
+    logging_steps="$LOGGING_STEPS" \
+    training_args.warmup_ratio=0.05 \
+    output_dir="$OUTPUT_DIR" \
+    per_device_train_batch_size="$PER_DEVICE_BS" \
+    global_batch_size="$GLOBAL_BATCH_SIZE" \
+    max_steps="$MAX_STEPS" \
+    weight_decay=1e-5 \
+    save_total_limit=5 \
+    +training_args.save_only_model="$SAVE_ONLY_MODEL" \
+    upload_checkpoints=false \
+    bf16=true \
+    tf32=true \
+    eval_bf16=true \
+    dataloader_pin_memory=true \
+    dataloader_num_workers="$NUM_WORKERS" \
+    image_resolution_width=320 \
+    image_resolution_height=176 \
+    save_lora_only=true \
+    max_chunk_size=4 \
+    frame_seqlen=880 \
+    save_strategy=steps \
+    drone_data_root="$DRONE_DATA_ROOT" \
+    dit_version="$WAN_CKPT_DIR" \
+    text_encoder_pretrained_path="$WAN_CKPT_DIR/models_t5_umt5-xxl-enc-bf16.pth" \
+    image_encoder_pretrained_path="$WAN_CKPT_DIR/models_clip_open-clip-xlm-roberta-large-vit-huge-14.pth" \
+    vae_pretrained_path="$WAN_CKPT_DIR/Wan2.1_VAE.pth" \
+    tokenizer_path="$TOKENIZER_DIR" \
+    "${EXTRA_ARGS[@]}"
