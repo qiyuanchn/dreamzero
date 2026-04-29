@@ -114,6 +114,28 @@ class ModalityConfig(BaseModel):
             self.eval_delta_indices = self.delta_indices
 
 
+class LazyDefaultStepFilter:
+    """Lazily materialize the default step filter for datasets without a step_filter file.
+
+    This avoids building a dict with one numpy array per trajectory for very large datasets.
+    """
+
+    def __init__(self, trajectory_lengths: np.ndarray):
+        self.trajectory_lengths = trajectory_lengths
+
+    def __getitem__(self, trajectory_id: int) -> np.ndarray:
+        return np.arange(int(self.trajectory_lengths[int(trajectory_id)]), dtype=np.int64)
+
+    def __contains__(self, trajectory_id: int) -> bool:
+        trajectory_id = int(trajectory_id)
+        return 0 <= trajectory_id < len(self.trajectory_lengths)
+
+    def get(self, trajectory_id: int, default=None):
+        if trajectory_id in self:
+            return self[trajectory_id]
+        return default
+
+
 class LeRobotSingleDataset(Dataset):
     """
     Base dataset class for LeRobot that supports sharding.
@@ -213,7 +235,7 @@ class LeRobotSingleDataset(Dataset):
         self._lerobot_relative_horizon_stats_meta = self._get_lerobot_relative_horizon_stats_meta() if self.relative_action_per_horizon else {}
         self._metadata = self._get_metadata()
         self._step_filter = self._get_step_filter()
-        self._all_steps = self._get_all_steps()
+        self._all_steps = None if getattr(self, "_skip_precompute_all_steps", False) else self._get_all_steps()
         self._modality_keys = self._get_modality_keys()
         self._delta_indices = self._get_delta_indices()
         self._max_delta_index = self._get_max_delta_index()
@@ -282,6 +304,11 @@ class LeRobotSingleDataset(Dataset):
                 ("traj_2", 0), ("traj_2", 1), ("traj_2", 2), ("traj_2", 3)
             ]
         """
+        if self._all_steps is None:
+            raise ValueError(
+                "all_steps was intentionally not precomputed for this dataset variant. "
+                "Use sharded iteration paths instead of random-access indexing."
+            )
         return self._all_steps
 
     @property
@@ -975,8 +1002,9 @@ class LeRobotSingleDataset(Dataset):
     def _get_step_filter(self) -> dict[int, np.ndarray]:
         """Get the step filter for the dataset."""
         step_filter_path = self.dataset_path / STEP_FILTER_FILENAME
-        step_filter = {}
         if step_filter_path.exists():
+            self._has_explicit_step_filter = True
+            step_filter = {}
             with open(step_filter_path, "r") as f:
                 for line in f:
                     episode_step_filter = json.loads(line)
@@ -984,12 +1012,10 @@ class LeRobotSingleDataset(Dataset):
                     all_indices = np.arange(self.trajectory_lengths[trajectory_id].item())
                     indices_to_filter = np.array(episode_step_filter["step_indices"])
                     step_filter[trajectory_id] = np.setdiff1d(all_indices, indices_to_filter)
-        else:
-            for trajectory_id in self.trajectory_ids:
-                step_filter[trajectory_id] = np.arange(
-                    self.trajectory_lengths[trajectory_id].item()
-                )
-        return step_filter
+            return step_filter
+
+        self._has_explicit_step_filter = False
+        return LazyDefaultStepFilter(self.trajectory_lengths)
 
     def _get_metadata(self) -> DatasetMetadata:
         """Get the metadata for the dataset.
@@ -1123,14 +1149,21 @@ class LeRobotSingleDataset(Dataset):
         """Get the trajectories in the dataset."""
         # Get trajectory lengths, IDs, and whitelist from dataset metadata
         episode_path = self.dataset_path / LE_ROBOT_EPISODE_FILENAME
-        with open(episode_path, "r") as f:
-            episode_metadata = [json.loads(line) for line in f]
         trajectory_ids = []
         trajectory_lengths = []
-        for episode in episode_metadata:
-            trajectory_ids.append(episode["episode_index"])
-            trajectory_lengths.append(episode["length"])
+        with open(episode_path, "r") as f:
+            for line in f:
+                episode = json.loads(line)
+                trajectory_ids.append(episode["episode_index"])
+                trajectory_lengths.append(episode["length"])
         return np.array(trajectory_ids), np.array(trajectory_lengths)
+
+    def get_num_available_steps(self, trajectory_id: int) -> int:
+        """Return the number of trainable steps for one trajectory without forcing full filter materialization."""
+        trajectory_id = int(trajectory_id)
+        if not getattr(self, "_has_explicit_step_filter", False):
+            return int(self.trajectory_lengths[trajectory_id])
+        return int(len(self.step_filter[trajectory_id]))
 
     def _get_all_steps(self) -> list[tuple[int, int]]:
         """Get the trajectory IDs and base indices for all steps in the dataset.
@@ -1270,6 +1303,8 @@ class LeRobotSingleDataset(Dataset):
         Returns:
             int: the total number of data points in the dataset.
         """
+        if self._all_steps is None:
+            return int(sum(self.get_num_available_steps(trajectory_id) for trajectory_id in self.trajectory_ids))
         return len(self.all_steps)
 
     def __str__(self) -> str:
@@ -1690,13 +1725,19 @@ class LeRobotSingleDataset(Dataset):
         original_key = subkey_meta.original_key
         if original_key is None:
             original_key = key
-        if pd.api.types.is_numeric_dtype(self.curr_traj_data[original_key]):
+        annotation_values = (
+            np.asarray(self.curr_traj_data.get(original_key))
+            if hasattr(self.curr_traj_data, "get")
+            else self.curr_traj_data[original_key].to_numpy()
+        )
+        selected_values = annotation_values[step_indices]
+        if pd.api.types.is_numeric_dtype(annotation_values):
             # Stored as list of integers
-            task_indices: list[int] = self.curr_traj_data[original_key].iloc[step_indices].tolist()
+            task_indices: list[int] = np.asarray(selected_values, dtype=np.int64).tolist()
             return self.tasks.loc[task_indices]["task"].tolist()
         else:
             # Stored as list of strings
-            return self.curr_traj_data[original_key].iloc[step_indices].astype(str).tolist()
+            return np.asarray(selected_values, dtype=str).tolist()
 
     def _get_language_from_metadata(
         self,

@@ -1,10 +1,12 @@
 from concurrent.futures import Future, ThreadPoolExecutor
+from dataclasses import dataclass
 import json
 from pathlib import Path
 import time
 
 import numpy as np
-import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 import torch
 import torch.distributed as dist
 from torch.utils.data import IterableDataset, get_worker_info
@@ -13,6 +15,65 @@ import yaml
 from groot.vla.common.utils import get_frames_by_timestamps
 
 from .lerobot import LE_ROBOT_EPISODE_FILENAME, LeRobotMixtureDataset, LeRobotSingleDataset
+
+
+def infer_required_parquet_columns(modality_keys: dict, lerobot_modality_meta) -> list[str]:
+    columns = {"timestamp", "episode_index", "frame_index", "index"}
+    for modality, keys in modality_keys.items():
+        if modality == "video":
+            continue
+        for key in keys:
+            try:
+                columns.add(lerobot_modality_meta.get_original_key(key))
+            except Exception:
+                if key.startswith("annotation."):
+                    columns.add(key)
+    return sorted(columns)
+
+
+@dataclass
+class CachedTrajectoryData:
+    data: dict[str, np.ndarray]
+
+    def __len__(self) -> int:
+        if not self.data:
+            return 0
+        first_key = next(iter(self.data))
+        return int(len(self.data[first_key]))
+
+    @property
+    def columns(self) -> set[str]:
+        return set(self.data.keys())
+
+    def __getitem__(self, key: str) -> np.ndarray:
+        return self.data[key]
+
+    def get(self, key: str) -> np.ndarray:
+        return self.data[key]
+
+
+def arrow_column_to_numpy(column: pa.ChunkedArray) -> np.ndarray:
+    combined = column.combine_chunks()
+    col_type = combined.type
+    if pa.types.is_fixed_size_list(col_type) or pa.types.is_list(col_type) or pa.types.is_large_list(col_type):
+        return np.asarray(combined.to_pylist())
+    if pa.types.is_string(col_type) or pa.types.is_large_string(col_type):
+        return np.asarray(combined.to_pylist(), dtype=object)
+    return combined.to_numpy(zero_copy_only=False)
+
+
+def load_cached_trajectory_data(
+    parquet_path: Path,
+    required_parquet_columns: list[str] | None,
+    global_start_index: int,
+) -> tuple[CachedTrajectoryData, np.ndarray]:
+    table = pq.read_table(parquet_path, columns=required_parquet_columns)
+    data = {name: arrow_column_to_numpy(table[name]) for name in table.column_names}
+    timestamps = np.asarray(data["timestamp"])
+    trajectory_length = len(timestamps)
+    if "index" not in data:
+        data["index"] = np.arange(global_start_index, global_start_index + trajectory_length, dtype=np.int64)
+    return CachedTrajectoryData(data=data), timestamps
 
 
 class ShardedLeRobotSingleDataset(LeRobotSingleDataset):
@@ -34,11 +95,15 @@ class ShardedLeRobotSingleDataset(LeRobotSingleDataset):
         self.all_parquet_paths = self.get_all_parquet_paths()
         self.sharded_trajectories, self.shard_lengths = self.generate_shards()
         self.frames_to_load = self.get_all_frames_to_load()
+        self.required_parquet_columns = infer_required_parquet_columns(
+            self.modality_keys,
+            self.lerobot_modality_meta,
+        )
 
         # Set shard caching properties
         self.shard_start_indices: dict[int, int] | None = None
         self.cached_shard: dict[str, np.ndarray] | None = None
-        self.cached_df: pd.DataFrame | None = None
+        self.cached_traj_dfs: dict[int, CachedTrajectoryData] | None = None
         self.frame_indices_map: dict[int, dict[str, np.ndarray]] | None = None
         self._executor = ThreadPoolExecutor(max_workers=1)
         self._cache_job: Future | None = None
@@ -164,10 +229,11 @@ class ShardedLeRobotSingleDataset(LeRobotSingleDataset):
         video_paths: dict[int, dict[str, Path]],
         parquet_paths: dict[int, Path],
         frames_to_load: dict[int, dict[str, np.ndarray]],
+        required_parquet_columns: list[str] | None = None,
         video_backend: str = "pyav",
         video_backend_kwargs: dict | None = None,
     ) -> tuple[
-        dict[str, np.ndarray], dict[int, int], pd.DataFrame, dict[int, dict[str, np.ndarray]]
+        dict[str, np.ndarray], dict[int, int], dict[int, CachedTrajectoryData], dict[int, dict[str, np.ndarray]]
     ]:
         print("Caching shard")
         start_time = time.time()
@@ -176,14 +242,16 @@ class ShardedLeRobotSingleDataset(LeRobotSingleDataset):
         trajectory_start_indices = {}
         frame_indices_map = {}
         curr_step_index = 0
-        cached_df = None
+        cached_traj_dfs: dict[int, CachedTrajectoryData] = {}
         curr_frame_index = {key: 0 for key in modality_keys["video"]}
         for trajectory_id in trajectory_ids:
             trajectory_start_indices[trajectory_id] = curr_step_index
             parquet_path = parquet_paths[trajectory_id]
-            parquet_df = pd.read_parquet(parquet_path)
-            # Check timestamps are in sync
-            parquet_timestamps = parquet_df["timestamp"].to_numpy()
+            traj_cache, parquet_timestamps = load_cached_trajectory_data(
+                parquet_path,
+                required_parquet_columns,
+                curr_step_index,
+            )
             trajectory_length = len(parquet_timestamps)
             if isinstance(trajectory_id, np.integer):
                 trajectory_id = trajectory_id.item()
@@ -217,10 +285,7 @@ class ShardedLeRobotSingleDataset(LeRobotSingleDataset):
                     video_backend_kwargs=video_backend_kwargs or {},
                 )
                 cached_frames[key].append(frames)
-            if cached_df is None:
-                cached_df = parquet_df
-            else:
-                cached_df = pd.concat([cached_df, parquet_df])
+            cached_traj_dfs[int(trajectory_id)] = traj_cache
             curr_step_index += trajectory_length
 
         # Concatenate the frames
@@ -228,12 +293,8 @@ class ShardedLeRobotSingleDataset(LeRobotSingleDataset):
             cached_frames[key] = np.concatenate(cached_frames[key], axis=0)
         end_time = time.time()
         print(f"Cached shard in {end_time - start_time:.2f} seconds")
-        assert cached_df is not None, "Cached dataframe is None"
-        # Add global "index" column if missing (some dataset formats omit it)
-        if "index" not in cached_df.columns:
-            cached_df = cached_df.reset_index(drop=True)
-            cached_df["index"] = cached_df.index
-        return cached_frames, trajectory_start_indices, cached_df, frame_indices_map
+        assert cached_traj_dfs, "Cached trajectory dataframes are empty"
+        return cached_frames, trajectory_start_indices, cached_traj_dfs, frame_indices_map
 
     def start_cache_shard(self, shard_index: int) -> None:
         """Start caching a shard in a background thread."""
@@ -244,6 +305,7 @@ class ShardedLeRobotSingleDataset(LeRobotSingleDataset):
             self.all_video_paths,
             self.all_parquet_paths,
             self.frames_to_load,
+            self.required_parquet_columns,
             self.video_backend,
             self.video_backend_kwargs,
         )
@@ -251,7 +313,7 @@ class ShardedLeRobotSingleDataset(LeRobotSingleDataset):
     def finish_cache_shard(self):
         """Get the cached shard."""
         assert self._cache_job is not None
-        self.cached_shard, self.shard_start_indices, self.cached_df, self.frame_indices_map = (
+        self.cached_shard, self.shard_start_indices, self.cached_traj_dfs, self.frame_indices_map = (
             self._cache_job.result()
         )
         self._cache_job = None  # Clear the future to allow memory to be freed
@@ -260,7 +322,7 @@ class ShardedLeRobotSingleDataset(LeRobotSingleDataset):
         """Delete the cached shard."""
         del self.cached_shard
         del self.shard_start_indices
-        del self.cached_df
+        del self.cached_traj_dfs
 
     def get_trajectories_in_shard(self) -> list[int]:
         """Get the trajectories in a shard."""
@@ -299,16 +361,18 @@ class ShardedLeRobotSingleDataset(LeRobotSingleDataset):
         ), f"Indices in shard are not loaded for {trajectory_id=}, {key=}, {step_indices=}"
         return self.cached_shard[key][indices_in_shard]
 
-    def get_trajectory_data(self, trajectory_id: int) -> pd.DataFrame:
+    def get_trajectory_data(self, trajectory_id: int) -> CachedTrajectoryData:
         """Get the trajectory data."""
-        assert self.cached_df is not None, "Cached dataframe is None"
-        traj_data = self.cached_df.loc[self.cached_df["episode_index"] == trajectory_id]
+        assert self.cached_traj_dfs is not None, "Cached trajectory dataframes are None"
+        if trajectory_id not in self.cached_traj_dfs:
+            raise ValueError(f"trajectory_id {trajectory_id} not found in cached trajectory data")
+        traj_data = self.cached_traj_dfs[trajectory_id]
         trajectory_index = self.get_trajectory_index(trajectory_id)
         trajectory_length = self.trajectory_lengths[trajectory_index]
         assert (
             len(traj_data) == trajectory_length
         ), f"Trajectory length mismatch: {len(traj_data)} != {trajectory_length} {self.args} {self.kwargs}"
-        indices = traj_data["index"].to_numpy()
+        indices = np.asarray(traj_data.get("index"))
         if len(indices) > 0:
             start_index = indices[0]
             expected_indices = np.arange(start_index, start_index + len(indices))
@@ -329,21 +393,26 @@ class ShardedLeRobotSubLangSingleActionChunkDatasetDROID(LeRobotSingleDataset):
         num_steps_per_shard: int = int(1e4),
         **kwargs,
     ):
+        self._skip_precompute_all_steps = True
         self.args = args
         self.kwargs = kwargs
         super().__init__(*args, **kwargs)
         self.num_steps_per_shard = num_steps_per_shard
-        self.all_video_paths = self.get_all_video_paths()
-        self.all_parquet_paths = self.get_all_parquet_paths()
-        self.sharded_trajectories, self.shard_lengths = self.generate_shards()
+        self.filtered_trajectory_ids, self.shard_trajectory_ranges, self.shard_lengths = (
+            self.generate_shards()
+        )
+        self.required_parquet_columns = infer_required_parquet_columns(
+            self.modality_keys,
+            self.lerobot_modality_meta,
+        )
 
         # Set shard caching properties
         self.shard_start_indices: dict[int, int] | None = None
         self.cached_shard: dict[str, np.ndarray] | None = None
-        self.cached_df: pd.DataFrame | None = None
+        self.cached_traj_dfs: dict[int, CachedTrajectoryData] | None = None
         self._executor = ThreadPoolExecutor(max_workers=1)
         self._cache_job: Future | None = None
-        # self._traj_cache: dict[int, pd.DataFrame] = {}
+        # self._traj_cache: dict[int, CachedTrajectoryData] = {}
         # # Precompute language key once to avoid repeated scans
         # self.language_key: str | None = next(
         #     (
@@ -360,41 +429,9 @@ class ShardedLeRobotSubLangSingleActionChunkDatasetDROID(LeRobotSingleDataset):
     @property
     def num_shards(self) -> int:
         """The number of shards."""
-        return len(self.sharded_trajectories)
+        return int(self.shard_lengths.shape[0])
 
-    def get_all_video_paths(self) -> dict[int, dict[str, Path]]:
-        """Get the video paths for all trajectories and all views.
-
-        Returns:
-            dict[int, dict[str, Path]]: The video paths for all trajectories.
-        """
-        video_paths = {}
-        for trajectory_id in self.trajectory_ids:
-            if isinstance(trajectory_id, np.integer):
-                trajectory_id = trajectory_id.item()
-            assert isinstance(
-                trajectory_id, int
-            ), f"trajectory_id must be an integer, got {type(trajectory_id)}"
-            video_paths[trajectory_id] = {}
-            for key in self.modality_keys["video"]:
-                assert key.startswith("video."), f"Video key must start with 'video.', got {key}"
-                video_paths[trajectory_id][key] = self.get_video_path(
-                    trajectory_id, key.replace("video.", "")
-                )
-        return video_paths
-
-    def get_all_parquet_paths(self) -> dict[int, Path]:
-        """Get the parquet paths for all trajectories.
-
-        Returns:
-            dict[int, Path]: The parquet paths for all trajectories.
-        """
-        return {
-            trajectory_id: self.get_parquet_path(trajectory_id)
-            for trajectory_id in self.trajectory_ids
-        }
-
-    def generate_shards(self) -> tuple[list[list[int]], np.ndarray]:
+    def generate_shards(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Generate shards of trajectories. We recommend num_steps_per_shard >> average trajectory length.
 
         Args:
@@ -403,9 +440,6 @@ class ShardedLeRobotSubLangSingleActionChunkDatasetDROID(LeRobotSingleDataset):
         Returns:
             list[list[str]]: The shards of trajectories.
         """
-        sharded_trajectories = [[]]
-        curr_num_steps = 0
-        curr_shard_index = 0
         discarded_episode_indices = []
         trajectory_ids = self.trajectory_ids
         if self.discard_bad_trajectories:
@@ -417,82 +451,69 @@ class ShardedLeRobotSubLangSingleActionChunkDatasetDROID(LeRobotSingleDataset):
             ]
 
         assert len(trajectory_ids) > 0, "No valid trajectories found for dataset"
-        total_steps = np.sum(
-            [len(self.step_filter[trajectory_id]) for trajectory_id in trajectory_ids]
-        ).astype(int)
+        filtered_trajectory_ids = np.asarray(trajectory_ids, dtype=np.int64)
+        step_counts = np.asarray(
+            [self.get_num_available_steps(trajectory_id) for trajectory_id in filtered_trajectory_ids],
+            dtype=np.int64,
+        )
+        total_steps = int(step_counts.sum())
         num_shards = np.ceil(total_steps / self.num_steps_per_shard).astype(int)
         cutoffs = np.linspace(0, total_steps, num_shards + 1)[1:]  # Exclude the first cutoff (0)
-        shard_lengths = []
-        last_num_steps = 0
-        for trajectory_id in trajectory_ids:
-            sharded_trajectories[-1].append(trajectory_id)
-            curr_num_steps += len(self.step_filter[trajectory_id])
-            if curr_num_steps > cutoffs[curr_shard_index]:
-                sharded_trajectories.append([])
-                curr_shard_index += 1
-                shard_lengths.append(curr_num_steps - last_num_steps)
-                last_num_steps = curr_num_steps
-        shard_lengths.append(curr_num_steps - last_num_steps)
-        assert (
-            curr_num_steps == total_steps
-        ), "Total steps not equal to the sum of trajectory lengths"
-        assert (
-            len(shard_lengths) == num_shards
-        ), "Number of shards not equal to the number of cutoffs"
-        assert (
-            len(sharded_trajectories) == num_shards
-        ), "Number of shards not equal to the number of cutoffs"
-        print(f"Generated {len(sharded_trajectories)} shards for dataset {self.dataset_path}")
-        return sharded_trajectories, np.array(shard_lengths)
+        cumulative_steps = np.cumsum(step_counts)
+        shard_end_positions = np.searchsorted(cumulative_steps, cutoffs, side="left") + 1
+        shard_start_positions = np.concatenate(([0], shard_end_positions[:-1]))
+        shard_lengths = np.diff(np.concatenate(([0], cumulative_steps[shard_end_positions - 1])))
 
-    @staticmethod
+        assert int(cumulative_steps[-1]) == total_steps, "Total steps not equal to the sum of trajectory lengths"
+        assert len(shard_lengths) == num_shards, "Number of shards not equal to the number of cutoffs"
+        print(f"Generated {len(shard_lengths)} shards for dataset {self.dataset_path}")
+        shard_ranges = np.stack([shard_start_positions, shard_end_positions], axis=1).astype(np.int64)
+        return filtered_trajectory_ids, shard_ranges, shard_lengths.astype(np.int64)
+
+    def get_trajectory_ids_for_shard(self, shard_index: int) -> np.ndarray:
+        start_pos, end_pos = self.shard_trajectory_ranges[shard_index]
+        return self.filtered_trajectory_ids[start_pos:end_pos]
+
     def get_shard(
+        self,
         trajectory_ids: list[int] | np.ndarray,
-        modality_keys: dict,
-        video_paths: dict[int, dict[str, Path]],
-        parquet_paths: dict[int, Path],
-        video_backend: str = "pyav",
-        video_backend_kwargs: dict | None = None,
-        fps: float = None,
-    ) -> tuple[dict[str, np.ndarray], dict[int, int], pd.DataFrame]:
+    ) -> tuple[dict[str, np.ndarray], dict[int, int], dict[int, CachedTrajectoryData]]:
         # Optional logging to avoid stdout overhead during tight loops
         # (controlled by instance-level verbose flag)
-        # Using a staticmethod, we cannot read self.verbose; defer to caller to control prints
         print("Caching shard")
         start_time = time.time()
-        assert "video" in modality_keys, "No video modality found. No need to use caching."
+        assert "video" in self.modality_keys, "No video modality found. No need to use caching."
         cached_frames = {}
         trajectory_start_indices = {}
         curr_step_index = 0
-        cached_df = None
+        cached_traj_dfs: dict[int, CachedTrajectoryData] = {}
         for trajectory_id in trajectory_ids:
             trajectory_start_indices[trajectory_id] = curr_step_index
-            parquet_path = parquet_paths[trajectory_id]
-            parquet_df = pd.read_parquet(parquet_path)
-            # Check timestamps are in sync
-            parquet_timestamps = parquet_df["timestamp"].to_numpy()
+            parquet_path = self.get_parquet_path(int(trajectory_id))
+            traj_cache, parquet_timestamps = load_cached_trajectory_data(
+                parquet_path,
+                self.required_parquet_columns,
+                curr_step_index,
+            )
             trajectory_length = len(parquet_timestamps)
             if isinstance(trajectory_id, np.integer):
                 trajectory_id = trajectory_id.item()
             assert isinstance(
                 trajectory_id, int
             ), f"trajectory_id must be an integer, got {type(trajectory_id)}"
-            for key in modality_keys["video"]:
+            for key in self.modality_keys["video"]:
                 assert key.startswith("video."), f"Video key must start with 'video.', got {key}"
                 if key not in cached_frames:
                     cached_frames[key] = []
                 frames = get_frames_by_timestamps(
-                    video_paths[trajectory_id][key].as_posix(),
+                    self.get_video_path(trajectory_id, key.replace("video.", "")).as_posix(),
                     timestamps=parquet_timestamps,
-                    video_backend=video_backend,
-                    video_backend_kwargs=video_backend_kwargs,
-                    fps=fps,
+                    video_backend=self.video_backend,
+                    video_backend_kwargs=self.video_backend_kwargs,
+                    fps=self.fps,
                 )
                 cached_frames[key].append(frames)
-            if cached_df is None:
-                cached_df = parquet_df
-            else:
-                cached_df = pd.concat([cached_df, parquet_df])
+            cached_traj_dfs[int(trajectory_id)] = traj_cache
             curr_step_index += trajectory_length
 
         # Concatenate the frames
@@ -500,37 +521,28 @@ class ShardedLeRobotSubLangSingleActionChunkDatasetDROID(LeRobotSingleDataset):
             cached_frames[key] = np.concatenate(cached_frames[key], axis=0)
         end_time = time.time()
         print(f"Cached shard in {end_time - start_time:.2f} seconds")
-        assert cached_df is not None, "Cached dataframe is None"
-        # Add global "index" column if missing (some dataset formats omit it)
-        if "index" not in cached_df.columns:
-            cached_df = cached_df.reset_index(drop=True)
-            cached_df["index"] = cached_df.index
-        return cached_frames, trajectory_start_indices, cached_df
+        assert cached_traj_dfs, "Cached trajectory dataframes are empty"
+        return cached_frames, trajectory_start_indices, cached_traj_dfs
 
     def start_cache_shard(self, shard_index: int) -> None:
         """Start caching a shard in a background thread."""
+        trajectory_ids = self.get_trajectory_ids_for_shard(shard_index)
         self._cache_job = self._executor.submit(
             self.get_shard,
-            self.sharded_trajectories[shard_index],
-            self.modality_keys,
-            self.all_video_paths,
-            self.all_parquet_paths,
-            self.video_backend,
-            self.video_backend_kwargs,
-            self.fps,
+            trajectory_ids,
         )
 
     def finish_cache_shard(self):
         """Get the cached shard."""
         assert self._cache_job is not None
-        self.cached_shard, self.shard_start_indices, self.cached_df = self._cache_job.result()
+        self.cached_shard, self.shard_start_indices, self.cached_traj_dfs = self._cache_job.result()
         self._cache_job = None  # Clear the future to allow memory to be freed
 
     def delete_cached_shard(self):
         """Delete the cached shard."""
         del self.cached_shard
         del self.shard_start_indices
-        del self.cached_df
+        del self.cached_traj_dfs
         # self._traj_cache.clear()
 
     def get_trajectories_in_shard(self) -> list[int]:
@@ -616,7 +628,7 @@ class ShardedLeRobotSubLangSingleActionChunkDatasetDROID(LeRobotSingleDataset):
                     break
         assert language_key is not None, "Language key not found"
         if language_key in traj_data.columns:
-            language_annotations = traj_data[language_key].values
+            language_annotations = np.asarray(traj_data.get(language_key))
         else:
             # Fallback to original behavior if language annotations are not available
             step_indices = np.maximum(step_indices, 0)
@@ -717,7 +729,7 @@ class ShardedLeRobotSubLangSingleActionChunkDatasetDROID(LeRobotSingleDataset):
         # Note [YL]: this handles action.task_progress if specified
         if key == "action.task_progress":
             # Get frame_index array and apply proper bounds checking and padding
-            frame_index_array = self.curr_traj_data["frame_index"].to_numpy()
+            frame_index_array = np.asarray(self.curr_traj_data.get("frame_index"))
             # Use retrieve_data_and_pad to handle out-of-bounds indices
             frame_index = self.retrieve_data_and_pad(
                 array=frame_index_array,
@@ -741,7 +753,7 @@ class ShardedLeRobotSubLangSingleActionChunkDatasetDROID(LeRobotSingleDataset):
         # Get the data array, shape: (T, D)
         assert self.curr_traj_data is not None, f"No data found for {trajectory_id=}"
         assert le_key in self.curr_traj_data.columns, f"No {le_key} found in {trajectory_id=}"
-        data_array: np.ndarray = np.stack(self.curr_traj_data[le_key])  # type: ignore
+        data_array = np.asarray(self.curr_traj_data.get(le_key))
         if data_array.ndim == 1:
             assert (
                 data_array.shape[0] == max_length
@@ -779,7 +791,7 @@ class ShardedLeRobotSubLangSingleActionChunkDatasetDROID(LeRobotSingleDataset):
                     language_key = subkey_meta.original_key
                     break
         if language_key is not None and language_key in traj_data.columns and len(step_indices) > 0:
-            language_annotations = traj_data[language_key].values
+            language_annotations = np.asarray(traj_data.get(language_key))
             first_idx = max(0, min(int(step_indices[0]), trajectory_length - 1))
             target_language = language_annotations[first_idx]
             
@@ -885,7 +897,7 @@ class ShardedLeRobotSubLangSingleActionChunkDatasetDROID(LeRobotSingleDataset):
         # Note [YL]: this handles action.task_progress if specified
         if key == "action.task_progress":
             # Get frame_index array and apply proper bounds checking and padding
-            frame_index_array = self.curr_traj_data["frame_index"].to_numpy()
+            frame_index_array = np.asarray(self.curr_traj_data.get("frame_index"))
             # Use retrieve_data_and_pad to handle out-of-bounds indices
             frame_index = self.retrieve_data_and_pad(
                 array=frame_index_array,
@@ -909,7 +921,7 @@ class ShardedLeRobotSubLangSingleActionChunkDatasetDROID(LeRobotSingleDataset):
         # Get the data array, shape: (T, D)
         assert self.curr_traj_data is not None, f"No data found for {trajectory_id=}"
         assert le_key in self.curr_traj_data.columns, f"No {le_key} found in {trajectory_id=}"
-        data_array: np.ndarray = np.stack(self.curr_traj_data[le_key])  # type: ignore
+        data_array = np.asarray(self.curr_traj_data.get(le_key))
         if data_array.ndim == 1:
             assert (
                 data_array.shape[0] == max_length
@@ -948,7 +960,7 @@ class ShardedLeRobotSubLangSingleActionChunkDatasetDROID(LeRobotSingleDataset):
                     language_key = subkey_meta.original_key
                     break
         if language_key is not None and language_key in traj_data.columns and len(step_indices) > 0:
-            language_annotations = traj_data[language_key].values
+            language_annotations = np.asarray(traj_data.get(language_key))
             first_idx = max(0, min(int(step_indices[0]), trajectory_length - 1))
             target_language = language_annotations[first_idx]
             
@@ -1095,7 +1107,7 @@ class ShardedLeRobotSubLangSingleActionChunkDatasetDROID(LeRobotSingleDataset):
             return action_data
         
         # Get state data array
-        state_array: np.ndarray = np.stack(traj_data[le_state_key])
+        state_array = np.asarray(traj_data.get(le_state_key))
         if state_array.ndim == 1:
             state_array = state_array.reshape(-1, 1)
         
@@ -1240,40 +1252,27 @@ class ShardedLeRobotSubLangSingleActionChunkDatasetDROID(LeRobotSingleDataset):
         return unique_sorted
 
 
-    def get_trajectory_data(self, trajectory_id: int) -> pd.DataFrame:
+    def get_trajectory_data(self, trajectory_id: int) -> CachedTrajectoryData:
         """Get the trajectory data."""
-        assert self.cached_df is not None, "Cached dataframe is None"
-
-            # Quick verification
-        if self.cached_df.empty:
-            raise ValueError("cached_df is completely empty!")
-
-        # # Fast path: return cached slice if available
-        # if trajectory_id in self._traj_cache:
-        #     return self._traj_cache[trajectory_id]
-
-        available_episodes = self.cached_df["episode_index"].unique()
-        if trajectory_id not in available_episodes:
+        assert self.cached_traj_dfs is not None, "Cached trajectory dataframes are None"
+        if trajectory_id not in self.cached_traj_dfs:
             raise ValueError(
-                f"trajectory_id {trajectory_id} not found in cached_df. "
-                f"Available episodes: {sorted(available_episodes)}"
+                f"trajectory_id {trajectory_id} not found in cached trajectory data. "
+                f"Available episodes: {sorted(self.cached_traj_dfs)}"
             )
-
-        traj_data = self.cached_df.loc[self.cached_df["episode_index"] == trajectory_id]
+        traj_data = self.cached_traj_dfs[trajectory_id]
         trajectory_index = self.get_trajectory_index(trajectory_id)
         trajectory_length = self.trajectory_lengths[trajectory_index]
         assert (
             len(traj_data) == trajectory_length
         ), f"Trajectory length mismatch: {len(traj_data)} != {trajectory_length} {self.args} {self.kwargs}"
-        indices = traj_data["index"].to_numpy()
+        indices = np.asarray(traj_data.get("index"))
         if len(indices) > 0:
             start_index = indices[0]
             expected_indices = np.arange(start_index, start_index + len(indices))
             assert np.array_equal(
                 indices, expected_indices
             ), f"[{self}] Index sequence mismatch in trajectory data, {trajectory_id=}"
-        # Store in cache to avoid repeated filtering on subsequent calls within a batch
-        # self._traj_cache[trajectory_id] = traj_data
         return traj_data
 
 
@@ -1323,19 +1322,22 @@ class ShardedLeRobotMixtureDataset(LeRobotMixtureDataset, IterableDataset):
 
         # Calculate shard sampling weights
         all_shard_sampling_weights = []
-        all_shards = []
+        shard_dataset_ids = []
+        shard_local_ids = []
         for dataset_id, (dataset, weight) in enumerate(
             zip(self.datasets, self._dataset_sampling_weights)
         ):
             shard_sampling_weights = dataset.shard_lengths / dataset.shard_lengths.sum()
             all_shard_sampling_weights.append(shard_sampling_weights * weight)
-            all_shards.extend(
-                [(dataset_id, shard_idx) for shard_idx in range(shard_sampling_weights.shape[0])]
+            shard_dataset_ids.append(
+                np.full(shard_sampling_weights.shape[0], dataset_id, dtype=np.int32)
             )
+            shard_local_ids.append(np.arange(shard_sampling_weights.shape[0], dtype=np.int32))
         all_shard_sampling_weights = np.concatenate(all_shard_sampling_weights)
         all_shard_sampling_weights /= all_shard_sampling_weights.sum()
         self._shard_sampling_weights = all_shard_sampling_weights
-        self._all_shards = all_shards
+        self._shard_dataset_ids = np.concatenate(shard_dataset_ids)
+        self._shard_local_ids = np.concatenate(shard_local_ids)
 
         # Generate shards sample schedule for all ranks and workers
         self._shards_sample_schedule = self.generate_shards_sample_schedule()
@@ -1359,21 +1361,21 @@ class ShardedLeRobotMixtureDataset(LeRobotMixtureDataset, IterableDataset):
         return self._dataset_sampling_weights
 
     @property
-    def shard_sampling_weights(self) -> list[np.ndarray]:
+    def shard_sampling_weights(self) -> np.ndarray:
         """The weights of each shard."""
         return self._shard_sampling_weights
 
     @property
-    def all_shards(self) -> list[tuple[int, int]]:
+    def all_shards(self) -> np.ndarray:
         """The shards to sample."""
-        return self._all_shards
+        return np.stack([self._shard_dataset_ids, self._shard_local_ids], axis=1)
 
     @property
-    def shards_sample_schedule(self) -> list[tuple[int, int]]:
+    def shards_sample_schedule(self) -> np.ndarray:
         """The shards sample schedule.
 
         Returns:
-            list[tuple[int, int]]: The shards to sample, in (dataset_index, shard_index).
+            np.ndarray: The shards to sample, in (dataset_index, shard_index).
         """
         assert self._shards_sample_schedule is not None, "Shards sample schedule not set."
         return self._shards_sample_schedule
@@ -1396,14 +1398,23 @@ class ShardedLeRobotMixtureDataset(LeRobotMixtureDataset, IterableDataset):
         if self.training:
             rng = np.random.default_rng(self.seed)
             sampled_shard_ids = rng.choice(
-                len(self.all_shards), size=self.num_shards_to_sample, p=self.shard_sampling_weights
+                len(self.shard_sampling_weights),
+                size=self.num_shards_to_sample,
+                p=self.shard_sampling_weights,
             )
-            shards_sample_schedule = [self.all_shards[i] for i in sampled_shard_ids]
+            shards_sample_schedule = np.stack(
+                [self._shard_dataset_ids[sampled_shard_ids], self._shard_local_ids[sampled_shard_ids]],
+                axis=1,
+            )
             rng.shuffle(shards_sample_schedule)
         else:
-            shards_sample_schedule = [
-                self.all_shards[i % len(self.all_shards)] for i in range(self.num_shards_to_sample)
-            ]
+            sampled_shard_ids = np.arange(self.num_shards_to_sample, dtype=np.int64) % len(
+                self.shard_sampling_weights
+            )
+            shards_sample_schedule = np.stack(
+                [self._shard_dataset_ids[sampled_shard_ids], self._shard_local_ids[sampled_shard_ids]],
+                axis=1,
+            )
         return shards_sample_schedule
 
     def filter_shards_sample_schedule(self):
@@ -1413,7 +1424,7 @@ class ShardedLeRobotMixtureDataset(LeRobotMixtureDataset, IterableDataset):
             list[tuple[int, int]]: The shards to sample, in (dataset_index, shard_index).
         """
         # Filter shards for each worker
-        filtered_schedule = []
+        filtered_indices = []
         worker_info = get_worker_info()
         # If we have multiple workers, further split shards among them
         if worker_info is not None:
@@ -1432,11 +1443,11 @@ class ShardedLeRobotMixtureDataset(LeRobotMixtureDataset, IterableDataset):
                 self.worker_id == worker_id and self.num_workers == num_workers
             ), "Worker ID or number of workers has been changed since it was set. This is not allowed."
 
-        for i, shard in enumerate(self.shards_sample_schedule):
+        for i in range(len(self.shards_sample_schedule)):
             if i % (self.world_size * num_workers) == self.rank * num_workers + worker_id:
-                filtered_schedule.append(shard)
+                filtered_indices.append(i)
         # print(f"Filtered shards for rank {self.rank}, worker {worker_id}: {filtered_schedule}")
-        return filtered_schedule
+        return self.shards_sample_schedule[np.asarray(filtered_indices, dtype=np.int64)]
 
     def __str__(self) -> str:
         dataset_descriptions = []

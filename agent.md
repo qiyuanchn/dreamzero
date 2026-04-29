@@ -109,6 +109,26 @@ export PYTHONPATH=/home/zqy/ws/dreamzero
   - `learning_rate`
 - 当前代码里 LoRA 和 full 的 loss 形式基本相同，区别主要在可训练参数范围，不在 loss 定义。
 
+### Drone 大数据集训练内存修复
+
+- 2026-04-26 对 `/data2/zqy/drone_lerobot_outputs_all` 的 sharded 训练加载做了内存侧重构，优先只改训练加载路径，不改数据格式。
+- 已修复的高内存点:
+  - `LeRobotSingleDataset` 不再为 sharded 数据集预构建全量 `all_steps`
+  - 默认 `step_filter` 改为 lazy 生成，不再为每个 episode 预建 `np.arange(...)`
+  - 读取 `episodes.jsonl` 改为流式解析，不再先把 167 万条 episode 元数据整文件装进 Python list
+  - `ShardedLeRobotSubLangSingleActionChunkDatasetDROID` 不再预构建全量 `all_video_paths / all_parquet_paths`
+  - drone shard 表示从“list[list[int]]”改成 trajectory range，避免 100 万级 shard 的 Python 小对象膨胀
+  - `ShardedLeRobotMixtureDataset` 的 shard schedule 改成 numpy 表示，避免百万级 tuple 列表
+- `scripts/train/drone_training.sh` 现在会按 `MAX_STEPS * GLOBAL_BATCH_SIZE / NUM_STEPS_PER_SHARD` 自动估算 `NUM_SHARDS_TO_SAMPLE`，默认给 4 倍余量，避免沿用库里的 `2^20` 级别 schedule。
+- 实测:
+  - 使用真实数据集直接初始化 `ShardedLeRobotSubLangSingleActionChunkDatasetDROID`
+  - `num_steps_per_shard=256`
+  - 峰值 RSS 约 `1.1 GB`
+  - 生成 shard 数约 `1,047,444`
+- 如果后续 8 卡训练仍有明显 CPU 内存压力，优先先调大:
+  - `NUM_STEPS_PER_SHARD=1024` 或 `2048`
+  - 再观察 dataloader 等待时间与内存之间的折中
+
 ## 当前推理状态
 
 - 当前 1.3B 推理路线:
