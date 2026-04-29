@@ -335,14 +335,9 @@ class DreamTransform(InvertibleModalityTransform):
             "t v h w c -> v t c h w",
         )
         if images.shape[0] == 1 and self.embodiment_tag == EmbodimentTag.DRONE:
-            _, t, c, h, w = images.shape
-            concat_images = np.zeros((1, t, c, 2 * h, 2 * w), dtype=images.dtype)
-            single_view = images[0]
-            concat_images[0, :, :, :h, :w] = single_view
-            concat_images[0, :, :, :h, w:] = single_view
-            concat_images[0, :, :, h:, :w] = single_view
-            concat_images[0, :, :, h:, w:] = single_view
-            return concat_images
+            # Drone is a true single-view setting. Keep the original single camera
+            # tensor instead of duplicating it into a 2x2 canvas.
+            return images
 
         if images.shape[0] > 1:
             v, t, c, h, w = images.shape

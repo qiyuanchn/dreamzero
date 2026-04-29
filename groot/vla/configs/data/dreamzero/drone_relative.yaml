@@ -4,12 +4,14 @@ defaults:
   - dreamzero/base_48_wan_fine_aug_relative
   - _self_
 
-max_state_dim: 64
+max_state_dim: 12
+max_action_dim: 72
 use_global_metadata: false
 relative_action: false
 relative_action_per_horizon: false
 max_chunk_size: 4
 dataset_shard_sampling_rate: 1.0
+drone_num_steps_per_shard: 2000
 mixture_dataset_cls: groot.vla.data.dataset.lerobot_sharded.ShardedLeRobotMixtureDataset.from_mixture_spec
 single_dataset_cls: groot.vla.data.dataset.lerobot_sharded.ShardedLeRobotSubLangSingleActionChunkDatasetDROID
 
@@ -36,6 +38,7 @@ train_dataset:
     max_chunk_size: ${max_chunk_size}
     relative_action: ${relative_action}
     relative_action_per_horizon: ${relative_action_per_horizon}
+    num_steps_per_shard: ${drone_num_steps_per_shard}
   mixture_kwargs:
     training: true
     balance_dataset_weights: false

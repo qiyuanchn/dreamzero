@@ -248,7 +248,7 @@ class GrootSimPolicy(BaseGrootSimPolicy):
         """
         super().__init__(embodiment_tag=embodiment_tag, model_path=model_path, device=device)
         model_dir = Path(model_path)
-        self.rank = dist.get_rank()
+        self.rank = dist.get_rank() if dist.is_initialized() else 0
 
         exp_cfg_dir = model_dir / "experiment_cfg"
         train_cfg_path = exp_cfg_dir / "conf.yaml"

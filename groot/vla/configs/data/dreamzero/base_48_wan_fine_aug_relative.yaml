@@ -342,7 +342,7 @@ transform_yam:
     - ${model_specific_transform}
 
 ################################################################################
-# drone (single-view drone-collected trajectories; state 28 dims, action 18 dims)
+# drone (single-view drone trajectories; obs 12 dims, full rpyva action 72 dims)
 ################################################################################
 
 modality_config_drone:
@@ -356,13 +356,12 @@ modality_config_drone:
     _target_: groot.vla.data.dataset.ModalityConfig
     delta_indices: [0]
     modality_keys:
-      - state.proprio
-      - state.dynamics
+      - state.obs
   action:
     _target_: groot.vla.data.dataset.ModalityConfig
     delta_indices: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]
     modality_keys:
-      - action.trajectory_coeffs
+      - action.rpyva
   language:
     _target_: groot.vla.data.dataset.ModalityConfig
     delta_indices: [0]
@@ -388,15 +387,14 @@ transform_drone:
     - _target_: groot.vla.data.transform.StateActionTransform
       apply_to: ${modality_config_drone.state.modality_keys}
       normalization_modes:
-        state.proprio: q99
-        state.dynamics: q99
+        state.obs: q99
 
     - _target_: groot.vla.data.transform.StateActionToTensor
       apply_to: ${modality_config_drone.action.modality_keys}
     - _target_: groot.vla.data.transform.StateActionTransform
       apply_to: ${modality_config_drone.action.modality_keys}
       normalization_modes:
-        action.trajectory_coeffs: q99
+        action.rpyva: q99
 
     - _target_: groot.vla.data.transform.ConcatTransform
       video_concat_order: ${modality_config_drone.video.modality_keys}

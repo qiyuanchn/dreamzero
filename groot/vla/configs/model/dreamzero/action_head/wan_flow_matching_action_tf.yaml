@@ -61,6 +61,8 @@ action_head_cfg:
       _convert_: object
       diffusion_model_pretrained_path: ${dit_version}
       model_type: "i2v"
+      action_dim: ${max_action_dim}
+      max_state_dim: ${max_state_dim}
       frame_seqlen: ${frame_seqlen}
       dim: 5120
       in_dim: 36
