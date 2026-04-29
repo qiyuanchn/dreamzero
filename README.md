@@ -1,309 +1,390 @@
-# NVIDIA DreamZero: World Action Models Are Zero-Shot Policies
-A research project from [NVIDIA GEAR Lab](https://research.nvidia.com/labs/gear/).
+# DreamZero Fork: 1.3B Training, Drone Embodiment, and Inference Workflows
 
-[![NVIDIA](https://img.shields.io/badge/NVIDIA-76B900?style=flat&logo=nvidia&logoColor=white)](https://www.nvidia.com) [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE) [![arXiv](https://img.shields.io/badge/arXiv-2602.15922-b31b1b.svg)](https://arxiv.org/abs/2602.15922)
+Fork of NVIDIA DreamZero with a practical local workflow centered on:
 
-[[Project Page](https://dreamzero0.github.io/)] [[Paper](https://arxiv.org/abs/2602.15922)]
+- Wan2.1 1.3B DreamZero training
+- DROID LoRA and full fine-tuning
+- Drone embodiment conversion, training, and offline evaluation
+- Distributed inference service validation on single-GPU and dual-GPU setups
 
-DreamZero is a World Action Model that jointly predicts actions and videos, achieving strong zero-shot performance on unseen tasks. This release package contains everything needed to load a pretrained DreamZero model and run distributed inference via a WebSocket server.
+This README describes the current state of this repository as it exists now, including the fork-specific pipelines and the main results already verified locally.
 
-## News
+## Upstream DreamZero
 
-- **02/27:** DreamZero is **#1 on both [MolmoSpaces]([https://huggingface.co/spaces/ai2-adapt/MolmoSpaces](https://molmospaces.allen.ai/leaderboard)) and [RoboArena]([https://robo-arena.github.io/](https://robo-arena.github.io/leaderboard))**! DreamZero-DROID is trained *from scratch* using only the DROID dataset — no pretraining on large-scale robot data, unlike competing VLAs. This demonstrates the strength of video-model backbones for generalist robot policies (VAMs/WAMs).
-- **02/27:** Released **DreamZero-AgiBot checkpoint** and **post-training code** for efficient few-shot adaptation. Post-train on just ~30 minutes of play data for your specific robot, and see the robot do basic language following and pick-and-place (see YAM experiments in our paper for more detail).
-- **02/20:** Released the **full training codebase, preprocessed dataset, and guide for new embodiments** to replicate the DreamZero-DROID checkpoint and train on your own robot. See [Adding a New Embodiment to DreamZero](docs/DATASET_TO_GEAR_AND_TRAIN.md) for a step-by-step walkthrough.
+DreamZero is a World Action Model that jointly predicts actions and videos for zero-shot robot policies.
 
-## Features
+- Upstream project page: <https://dreamzero0.github.io/>
+- Upstream paper: <https://arxiv.org/abs/2602.15922>
+- Upstream repository lineage: NVIDIA GEAR DreamZero
 
-**Available Now**
-- Pretrained DreamZero-DROID model checkpoint [[Huggingface](https://huggingface.co/GEAR-Dreams/DreamZero-DROID)]
-- Pretrained DreamZero-AgiBot checkpoint (for post-training on new embodiments) [[Huggingface](https://huggingface.co/GEAR-Dreams/DreamZero-AgiBot)]
-- Distributed WebSocket inference server (GB200, H100)
-- DiT caching for optimized inference (~0.6s on GB200, ~3s on H100)
-- DROID simulation evaluation support
-- [RoboArena](https://robo-arena.github.io/) integration (DROID real)
-- Video generation and saving (MP4)
-- LoRA and full fine-tuning training scripts
-- Training on new embodiments (AgiBot, YAM) — see [guide](docs/DATASET_TO_GEAR_AND_TRAIN.md)
+This fork keeps the upstream codebase but adds a more operational workflow for local training and deployment.
 
-**Coming Soon**
-- [PolaRiS](https://polaris-evals.github.io/) simulation environment support
-- [Genie 3.0](https://arxiv.org/abs/2601.02078) sim environment support for DreamZero-AgiBot
+## What This Fork Adds
 
-## Fork Updates
+The main fork-specific capabilities are:
 
-This fork currently tracks a local DreamZero 1.3B workflow centered on DROID training and TensorRT-backed inference validation. The main updates on top of the upstream `main` branch are:
+- DreamZero 1.3B training path based on `Wan2.1-Fun-V1.1-1.3B-InP`
+- Stable DROID training scripts for LoRA and full fine-tuning
+- Unified output layout under `outputs/train`, `outputs/inference`, `outputs/logs`, and `outputs/reports`
+- TensorBoard-first monitoring and `loss_log.jsonl` backfill support
+- Inference service scripts for start/stop/TensorRT build workflows
+- Drone embodiment support:
+  - converter from raw tar/source trajectories to LeRobot-style data
+  - single-view drone data config
+  - offline open-loop evaluation
+  - training entrypoint for large drone corpora
+- Large-scale sharded dataset memory fixes for multi-million-episode drone training
 
-- DreamZero 1.3B training support based on `alibaba-pai/Wan2.1-Fun-V1.1-1.3B-InP`
-- LoRA and full fine-tune script fixes for stable startup, dataset path resolution, and checkpoint output
-- Unified output layout under `outputs/train/...` and `outputs/inference/...`
-- TensorBoard-first monitoring, plus `loss_log.jsonl` to TensorBoard backfill support
-- Inference service launch/stop scripts, TensorRT engine build helpers, and safer service defaults
-- Updated action/inference handling for real video chunking and TRT-backed startup
+## Current Status
 
-See the fork-specific guides for the current workflow:
+### Verified Training
 
-- [Training guide](docs/TRAINING_GUIDE.md)
-- [Inference service guide](docs/INFERENCE_SERVICE_GUIDE.md)
+- DROID LoRA training is the most mature local training path
+- DROID full fine-tune startup and checkpoint emission are verified
+- Drone sharded training loader has been refactored to avoid host RAM blowups on very large datasets
 
-## Local Training Notes
+### Verified Inference
 
-Recent local runs were collected from `/data2/zqy/dreamzero/outputs/train` and summarized here for reproducibility. These are local verification runs rather than official benchmark claims.
+- Single-GPU inference works
+- Dual-GPU inference works
+- Multi-chunk real-video client runs work
+- `reset`-triggered video saving works
+- New LoRA checkpoints have been validated through the inference path
 
-| Date | Run | Artifact path | Last step seen | Best / min loss seen | Notes |
-|---|---|---|---:|---:|---|
-| 2026-03-26 | DROID full fine-tune verify | `/data2/zqy/dreamzero/outputs/train/2026-03-26/21-39-35-droid-full` | 740 | 0.3313 | Early full fine-tune run with `loss_log.jsonl` exported |
-| 2026-03-26 | DROID LoRA | `/data2/zqy/dreamzero/outputs/train/2026-03-26/23-21-38-droid-lora` | 2000 | 0.1092 | Checkpoint saved at `checkpoint-2000` |
-| 2026-04-04 | DROID LoRA | `/data2/zqy/dreamzero/outputs/train/2026-04-04/10-11-15-droid-lora` | 3000 | 0.1058 | Continued convergence after the initial 2k-step run |
-| 2026-04-04 | DROID LoRA continue | `/data2/zqy/dreamzero/outputs/train/2026-04-04/10-11-15-droid-lora-continue` | 1630 | 0.1161 | Resume/continue validation run |
-| 2026-04-04 | DROID LoRA long run | `/data2/zqy/dreamzero/outputs/train/2026-04-04/22-31-42-droid-lora` | 7240 | 0.0922 | Checkpoints verified through `checkpoint-7000`; loss stayed near `0.11-0.13` late in training |
-| 2026-04-05 | Full fine-tune smoke test | `/data2/zqy/dreamzero/outputs/train/2026-04-05/full_verify_workers0_save_on_data2` | 10 | 0.4420 | Short validation run used to confirm workers=`0` and checkpoint saving on `/data2` |
+### Current Limitations
 
-Practical takeaways from these runs:
+- 4-GPU inference is not considered stable in this fork
+- The primary validated inference path is single-GPU or dual-GPU
+- Full fine-tune still needs longer-duration local runs before making strong quality claims
 
-- LoRA training is the most mature local path so far and has been verified through at least `7000` training steps.
-- The long LoRA run reached a minimum observed loss of `0.0922`, with checkpoints written every `1000` steps up to `checkpoint-7000`.
-- Full fine-tune startup, worker configuration, and checkpoint emission have been validated with the latest script fixes, but the full route still needs longer-duration training before making performance claims.
+## Key Achievements in This Fork
 
-## Testing Out DreamZero in Simulation with API
-We provide an inference script that directly evaluates a hosted DreamZero-DROID policy on [`sim_evals`](https://github.com/arhanjain/sim-evals). To test out the policy, first request access to the API via this form [link](https://forms.gle/zCj5zjDvHsoeuMXU7). Then, follow these instructions to install [`sim_evals`](https://github.com/arhanjain/sim-evals) and launch evaluation.
+- Converted the drone embodiment to a clean `12D observation + 72D flattened RPYVA action` format
+- Updated the model/data path to treat drone as a true single-view embodiment instead of duplicating one image into a tiled canvas
+- Added drone offline evaluation over converted LeRobot episodes with optional multi-chunk video stitching
+- Reworked sharded dataset loading so million-episode corpora do not pre-expand `all_steps`, `step_filter`, or Python-heavy shard schedules into hundreds of GB of RAM
+- Validated that the new sharded drone dataset initialization path can start with about `1.1 GB` RSS on the real large dataset instead of exploding host memory
 
-```bash
-# Clone repository
-git clone --recurse-submodules https://github.com/arhanjain/sim-evals.git
-cd sim-evals
+## Repository Layout
 
-# Install uv
-curl -LsSf https://astral.sh/uv/install.sh | sh
+Important entrypoints:
 
-# Activate uv environment
-uv sync
-source .venv/bin/activate
+- Training:
+  - `scripts/train/droid_training_lora.sh`
+  - `scripts/train/droid_training_full_finetune.sh`
+  - `scripts/train/drone_training.sh`
+- Data conversion:
+  - `scripts/data/convert_droid.py`
+  - `scripts/data/convert_drone_tar_to_lerobot.py`
+- Inference:
+  - `scripts/inference/start_dreamzero_service.sh`
+  - `scripts/inference/stop_dreamzero_service.sh`
+  - `scripts/inference/build_trt_engine.sh`
+  - `test_client_AR.py`
+- Offline evaluation:
+  - `scripts/open_loop_drone.py`
+- Docs:
+  - `docs/TRAINING_GUIDE.md`
+  - `docs/INFERENCE_SERVICE_GUIDE.md`
+  - `docs/DATASET_TO_GEAR_AND_TRAIN.md`
+  - `docs/DROID_CONVERSION.md`
 
-# [Optional] update pytorch versions
-pip install torch==2.9.1 torchvision==0.24.1 torchaudio==2.9.1 --index-url https://download.pytorch.org/whl/cu129
+## Environment Setup
 
-# Download assets (may need to export HF_TOKEN=<YOUR_HUGGINGFACE_TOKEN> first)
-uvx hf download owhan/DROID-sim-environments --repo-type dataset --local-dir assets
+### Python
 
-# Run eval script
-cd ..
-python eval_utils/run_sim_eval.py --host <API_HOST> --port <API_PORT> 
-```
+- Recommended: Python `3.11`
 
-The outputs are saved in `runs` directory.
+### Conda
 
-
-## Quick Start
-
-### Prerequisites
-
-- **Python**: 3.11
-- **Hardware**: Multi-GPU setup (tested on GB200, H100)
-  - Minimum: 2 GPUs for distributed inference
-- **CUDA**: Compatible GPU with CUDA 12.9+
-
-### Installation
-
-1. **Create conda environment:**
 ```bash
 conda create -n dreamzero python=3.11
 conda activate dreamzero
 ```
 
-2. **Install dependencies (PyTorch 2.8+ with CUDA 12.9+):**
+### Install
+
 ```bash
 pip install -e . --extra-index-url https://download.pytorch.org/whl/cu129
-```
-
-3. **Install flash attention:**
-```bash
 MAX_JOBS=8 pip install --no-build-isolation flash-attn
 ```
 
-4. **[GB200 ONLY, SKIP FOR H100] Install Transformer Engine:**
-```bash
-pip install --no-build-isolation transformer_engine[pytorch]
-```
+Optional components:
 
-5. **[GB200 ONLY FOR TENSORRT, SKIP FOR H100] Install Tensorrt:**
-```bash
-pip install tensorrt==10.13.2.6 tensorrt_cu13==10.13.2.6 tensorrt_cu13_libs==10.13.2.6 tensorrt_cu13_bindings==10.13.2.6 --no-deps
-pip install transformer_engine==2.10.0 transformer_engine_cu12==2.10.0 transformer_engine_torch==2.10.0
-```
+- Transformer Engine: useful on GB200 workflows
+- TensorRT: only needed for the TensorRT-backed inference route
 
-## Downloading Pretrained Checkpoints
-
-### DreamZero-DROID (for inference)
-
-We release a 14B pretrained DROID checkpoint on [Huggingface](https://huggingface.co/GEAR-Dreams/DreamZero-DROID). To download the checkpoint, run
+### Local Shell Setup
 
 ```bash
-hf download GEAR-Dreams/DreamZero-DROID --repo-type model --local-dir <path/to/checkpoint>
+source /home/zqy/miniconda3/etc/profile.d/conda.sh
+conda activate dreamzero
+cd /home/zqy/ws/dreamzero
+export PYTHONPATH=/home/zqy/ws/dreamzero
+export TOKENIZERS_PARALLELISM=false
+export NO_ALBUMENTATIONS_UPDATE=1
 ```
 
-### DreamZero-AgiBot (for fine-tuning on new embodiments)
+## Checkpoints
 
-To fine-tune DreamZero on a new embodiment (e.g. YAM, AgiBot), download the pretrained [DreamZero-AgiBot](https://huggingface.co/GEAR-Dreams/DreamZero-AgiBot) checkpoint (~45GB) to `./checkpoints/DreamZero-AgiBot`:
+### Wan 1.3B Base Model
 
-```bash
-git clone https://huggingface.co/GEAR-Dreams/DreamZero-AgiBot ./checkpoints/DreamZero-AgiBot
-```
+This fork primarily trains from:
 
-Or with the Hugging Face CLI:
+- `alibaba-pai/Wan2.1-Fun-V1.1-1.3B-InP`
+- tokenizer: `google/umt5-xxl`
 
-```bash
-hf download GEAR-Dreams/DreamZero-AgiBot --repo-type model --local-dir ./checkpoints/DreamZero-AgiBot
-```
-
-The YAM and AgiBot training scripts use `pretrained_model_path=./checkpoints/DreamZero-AgiBot` by default. See the [new embodiment guide](docs/DATASET_TO_GEAR_AND_TRAIN.md) for usage.
-
-## Running the Inference Server
-
-### Command Overview
-
-The inference server uses PyTorch distributed training utilities to parallelize the model across multiple GPUs:
-
-```bash
-CUDA_VISIBLE_DEVICES=0,1 python -m torch.distributed.run --standalone --nproc_per_node=2 socket_test_optimized_AR.py --port 5000 --enable-dit-cache --model-path <path/to/checkpoint>
-```
-
-(Optional only for GB200) Tensorrt enables faster generation
-```bash
-export LOAD_TRT_ENGINE=<path/to/checkpoint>/tensorrt/wan/WanModel_nvfp4.trt 
-export DYNAMIC_CACHE_SCHEDULE=true 
-CUDA_VISIBLE_DEVICES=0,1 python -m torch.distributed.run --standalone --nproc_per_node=2 /mnt/aws-lfs-02/shared/seonghyeony/dreamzero/socket_test_optimized_AR.py --port 8000 --enable-dit-cache --model-path <path/to/checkpoint>
-```
-To verify the server is working, run a test client. The first few inferences will take a few minutes to warm up. After warming up, inference takes ~0.6s on GB200 and ~3s on H100.
-
-```
-python test_client_AR.py --port 5000
-```
-
-### Command-line Arguments
-
-- `--port`: Port number for the WebSocket server (default: 8000)
-- `--model-path`: Path to the pretrained model checkpoint directory
-- `--enable-dit-cache`: Enable caching in DiT layers for faster inference (recommended)
-- `--max-chunk-size`: Override max_chunk_size for inference (optional)
-- `--timeout-seconds`: Server timeout in seconds (default: 50000)
-- `--index`: Index for output directory naming (default: 0)
-
-
-### Output
-
-The server saves:
-- **Videos**: Generated video predictions as MP4 files in `{model_path}/real_world_eval_gen_{date}_{index}/{checkpoint_name}/`
-- **Input observations**: Saved per message in `{output_dir}/inputs/{msg_index}_{timestamp}/`
-
-
-## Training
-
-> **Training on a new embodiment?** See [Adding a New Embodiment to DreamZero](docs/DATASET_TO_GEAR_AND_TRAIN.md) for a complete guide on converting your dataset, configuring modalities, and launching training. <em>Make sure to align the 3 camera view order to ensure positive transfer.</em>
-
-### Downloading Pretrained Base Model Weights
-
-DreamZero is built on top of [Wan2.1-Fun-V1.1-1.3B-InP](https://huggingface.co/alibaba-pai/Wan2.1-Fun-V1.1-1.3B-InP) and uses the [umt5-xxl](https://huggingface.co/google/umt5-xxl) tokenizer. Download both before training:
+Download them with:
 
 ```bash
 pip install "huggingface_hub[cli]"
 
-# You may need to set your HuggingFace token:
-# export HF_TOKEN=<YOUR_HUGGINGFACE_TOKEN>
+hf download alibaba-pai/Wan2.1-Fun-V1.1-1.3B-InP \
+  --local-dir ./checkpoints/Wan2.1-Fun-V1.1-1.3B-InP
 
-# Download Wan2.1-Fun 1.3B model weights (~20GB)
-hf download alibaba-pai/Wan2.1-Fun-V1.1-1.3B-InP --local-dir ./checkpoints/Wan2.1-Fun-V1.1-1.3B-InP
-
-# Download umt5-xxl tokenizer
-hf download google/umt5-xxl --local-dir ./checkpoints/umt5-xxl
+hf download google/umt5-xxl \
+  --local-dir ./checkpoints/umt5-xxl
 ```
 
-> **Note:** The training script will auto-download these if they are not found at the configured paths, but pre-downloading is recommended to avoid delays at launch.
+### Upstream DreamZero Checkpoints
 
-### DROID Dataset
+Upstream released checkpoints remain useful references:
 
-We release the preprocessed DROID dataset used to train DreamZero on HuggingFace: [GEAR-Dreams/DreamZero-DROID-Data](https://huggingface.co/datasets/GEAR-Dreams/DreamZero-DROID-Data).
+- DreamZero-DROID: <https://huggingface.co/GEAR-Dreams/DreamZero-DROID>
+- DreamZero-AgiBot: <https://huggingface.co/GEAR-Dreams/DreamZero-AgiBot>
 
-This dataset is derived from the [DROID 1.0.1](https://droid-dataset.github.io/) dataset with the following modifications:
-- Converted from RLDS/TFDS format to [LeRobot](https://github.com/huggingface/lerobot) v2.0 format
-- Idle frames removed using [Physical Intelligence's idle frame detector](https://github.com/Physical-Intelligence/openpi/blob/main/examples/droid/README_train.md#data-filtering) (`droid_sample_ranges_v1_0_1.json`)
-- Episodes without language annotations are filtered out
-- Successful episodes only (episodes with non-zero reward)
-- 3 camera views: `exterior_image_1_left`, `exterior_image_2_left`, `wrist_image_left`
+## Output Layout
 
-**To download the preprocessed dataset (~131GB):**
+This fork standardizes outputs under:
+
+- `outputs/train`
+- `outputs/inference`
+- `outputs/logs`
+- `outputs/reports`
+- `outputs/tensorboard`
+
+Training scripts maintain convenient symlinks such as:
+
+- `outputs/train/latest`
+- `outputs/train/latest_droid_lora`
+- `outputs/train/latest_droid_full`
+
+## DROID Workflow
+
+### Dataset
+
+Recommended main training dataset:
+
+- Hugging Face preprocessed DreamZero DROID data
+- dataset repo: `GEAR-Dreams/DreamZero-DROID-Data`
+
+Download:
 
 ```bash
-huggingface-cli download GEAR-Dreams/DreamZero-DROID-Data --repo-type dataset --local-dir ./data/droid_lerobot
+huggingface-cli download GEAR-Dreams/DreamZero-DROID-Data \
+  --repo-type dataset \
+  --local-dir ./data/droid_lerobot
 ```
 
-If you want to reproduce the dataset conversion from raw DROID 1.0.1 yourself (or modify the filtering), see [docs/DROID_CONVERSION.md](docs/DROID_CONVERSION.md).
-
-### Running Training
+### LoRA Training
 
 ```bash
-# Configure paths (override defaults as needed)
-export DROID_DATA_ROOT="./data/droid_lerobot"
-export OUTPUT_DIR="./checkpoints/dreamzero_droid"
+export DROID_DATA_ROOT=./data/droid_lerobot
+export WAN_CKPT_DIR=./checkpoints/Wan2.1-Fun-V1.1-1.3B-InP
+export TOKENIZER_DIR=./checkpoints/umt5-xxl
 export NUM_GPUS=4
 
-# Point to your downloaded model weights (if not using default paths)
-export WAN_CKPT_DIR="./checkpoints/Wan2.1-Fun-V1.1-1.3B-InP"
-export TOKENIZER_DIR="./checkpoints/umt5-xxl"
-
-# Launch training
-bash scripts/train/droid_training.sh
+bash scripts/train/droid_training_lora.sh
 ```
 
-**Using Wan2.2-TI2V-5B backbone (5B params, lower VRAM):** To train with the smaller Wan2.2-TI2V-5B model instead of Wan2.1-I2V-14B, see [docs/WAN22_BACKBONE.md](docs/WAN22_BACKBONE.md) and run `bash scripts/train/droid_training_wan22.sh`.
+### Full Fine-Tuning
 
-### Training Configuration
+```bash
+export DROID_DATA_ROOT=./data/droid_lerobot
+export WAN_CKPT_DIR=./checkpoints/Wan2.1-Fun-V1.1-1.3B-InP
+export TOKENIZER_DIR=./checkpoints/umt5-xxl
+export NUM_GPUS=4
 
-The training script uses Hydra for configuration and DeepSpeed ZeRO Stage 2 for distributed training. Key defaults:
-
-| Parameter | Default | Description |
-|---|---|---|
-| `NUM_GPUS` | 4 | Number of GPUs |
-| `per_device_train_batch_size` | 1 | Batch size per GPU |
-| `learning_rate` | 1e-5 | Learning rate |
-| `max_steps` | 10 | Max training steps (increase for full training) |
-| `warmup_ratio` | 0.05 | Warmup ratio |
-| `weight_decay` | 1e-5 | Weight decay |
-| `image_resolution_width` | 320 | Image width |
-| `image_resolution_height` | 176 | Image height |
-| `num_frames` | 33 | Number of video frames |
-| `action_horizon` | 24 | Action prediction horizon |
-| `save_lora_only` | true | Only save LoRA weights |
-| `bf16` | true | Use bfloat16 precision |
-
-> **Note:** `max_steps=10` is set for a quick sanity check. For full training, increase this to your desired number of steps and configure `save_steps` / `save_strategy` accordingly.
-
-
-## Citation
-
-If you use DreamZero in your research, please cite:
-
-```bibtex
-@misc{ye2026worldactionmodelszeroshot,
-      title={World Action Models are Zero-shot Policies}, 
-      author={Seonghyeon Ye and Yunhao Ge and Kaiyuan Zheng and Shenyuan Gao and Sihyun Yu and George Kurian and Suneel Indupuru and You Liang Tan and Chuning Zhu and Jiannan Xiang and Ayaan Malik and Kyungmin Lee and William Liang and Nadun Ranawaka and Jiasheng Gu and Yinzhen Xu and Guanzhi Wang and Fengyuan Hu and Avnish Narayan and Johan Bjorck and Jing Wang and Gwanghyun Kim and Dantong Niu and Ruijie Zheng and Yuqi Xie and Jimmy Wu and Qi Wang and Ryan Julian and Danfei Xu and Yilun Du and Yevgen Chebotar and Scott Reed and Jan Kautz and Yuke Zhu and Linxi "Jim" Fan and Joel Jang},
-      year={2026},
-      eprint={2602.15922},
-      archivePrefix={arXiv},
-      primaryClass={cs.RO},
-      url={https://arxiv.org/abs/2602.15922}, 
-}
+bash scripts/train/droid_training_full_finetune.sh
 ```
+
+### Local DROID Training Notes
+
+What has already been verified locally:
+
+- LoRA startup is stable
+- Hydra logging directory overrides are fixed
+- checkpoints are emitted correctly
+- TensorBoard logging is enabled by default
+- latest local LoRA checkpoints have been exercised through inference
+
+## Drone Workflow
+
+### Drone Data Format
+
+The current drone embodiment in this fork uses:
+
+- video: `video.rgb`
+- state: `observation.state.obs` with `12` dimensions
+- action: flattened `rpyva` with `72` dimensions
+- language: `annotation.task`
+
+### Drone Conversion
+
+Use the converter to build a LeRobot-style dataset from raw drone trajectories:
+
+```bash
+python scripts/data/convert_drone_tar_to_lerobot.py \
+  --input <raw-drone-root-or-tar> \
+  --output <converted-output-dir>
+```
+
+Important converter properties in this fork:
+
+- emits chunked LeRobot layout
+- supports large parallel conversion
+- supports `source-link` video mode to reuse original `rgb.mp4`
+- writes richer conversion metadata to `conversion_summary.json`
+
+### Drone Training
+
+Main entrypoint:
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1,2,3 \
+NUM_GPUS=4 \
+DRONE_DATA_ROOT=/path/to/drone_lerobot \
+OUTPUT_DIR=/path/to/output \
+bash scripts/train/drone_training.sh
+```
+
+Useful knobs:
+
+- `NUM_STEPS_PER_SHARD`
+- `NUM_WORKERS`
+- `MAX_STEPS`
+- `SAVE_STEPS`
+- `LOGGING_STEPS`
+
+### Large Drone Dataset Memory Fixes
+
+This fork includes a substantial sharded loader rewrite for very large drone corpora.
+
+Fixed high-memory behaviors:
+
+- no precomputed full `all_steps` for sharded datasets
+- lazy default `step_filter`
+- streamed `episodes.jsonl` parsing
+- no eager `all_video_paths` / `all_parquet_paths` for the drone sharded loader
+- shard bookkeeping rewritten to compact numpy/range-based structures
+- shard schedule no longer stored as huge Python tuple lists
+
+Practical result already measured on the real large drone dataset:
+
+- `num_steps_per_shard=256`
+- dataset init peak RSS about `1.1 GB`
+- shard count about `1,047,444`
+
+For very large runs, increasing `NUM_STEPS_PER_SHARD` to `1024` or `2048` is the first tuning lever if host RAM is still under pressure.
+
+### Drone Offline Evaluation
+
+```bash
+python scripts/open_loop_drone.py \
+  --model_path <checkpoint-or-run-dir> \
+  --dataset_path <converted-drone-dataset> \
+  --device cuda:0 \
+  --index 0 \
+  --output_dir outputs/inference/drone_open_loop
+```
+
+The current evaluator supports:
+
+- action metric plotting
+- multi-chunk evaluation
+- optional concatenated decoded video
+- old tiled-drone-frame visualization fallback
+
+## Inference Service
+
+### Start the Service
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1 \
+PORT=6000 \
+MODEL_PATH=<checkpoint-or-model-dir> \
+bash scripts/inference/start_dreamzero_service.sh
+```
+
+### Test Client
+
+```bash
+python test_client_AR.py --host 127.0.0.1 --port 6000 --num-chunks 3
+```
+
+### What Is Verified
+
+- single-GPU server path
+- dual-GPU server path
+- multi-chunk client path
+- real video client path
+- reset-triggered MP4 saving
+
+### Current Inference Caveats
+
+- 4-GPU inference is not recommended
+- the service start script reporting success does not guarantee the socket is ready yet
+- a LoRA `checkpoint-*` cannot be used directly unless `experiment_cfg/conf.yaml` is present
+
+If needed, add a symlink inside a LoRA checkpoint:
+
+```bash
+cd <run_dir>/checkpoint-2000
+ln -sfn ../experiment_cfg experiment_cfg
+```
+
+## Current Recommended Workflows
+
+### Best-Validated Training Path
+
+1. Start with DROID LoRA
+2. Monitor with TensorBoard
+3. Validate checkpoints through dual-GPU inference
+4. Move to full fine-tuning only after LoRA is stable
+
+### Best-Validated Inference Path
+
+1. Dual GPU: `CUDA_VISIBLE_DEVICES=0,1`
+2. Use `test_client_AR.py` for smoke tests and real video multi-chunk runs
+3. Check port readiness with `ss -ltnp`
+4. Tail the generated service log if startup looks suspicious
+
+## Local Results Snapshot
+
+This fork has already produced local verification runs, including:
+
+- DROID LoRA checkpoints through at least `7000` steps
+- best observed local LoRA loss around `0.0922`
+- full fine-tune smoke tests with successful save behavior
+- dual-GPU real-video inference validation on trained LoRA checkpoints
+
+These are engineering validation milestones, not official benchmark claims.
+
+## Additional Documentation
+
+- [Training guide](docs/TRAINING_GUIDE.md)
+- [Inference service guide](docs/INFERENCE_SERVICE_GUIDE.md)
+- [Adding a new embodiment](docs/DATASET_TO_GEAR_AND_TRAIN.md)
+- [DROID conversion notes](docs/DROID_CONVERSION.md)
+- [Wan2.2 backbone notes](docs/WAN22_BACKBONE.md)
+
+## Known Good Practical Notes
+
+- `TOKENIZERS_PARALLELISM=false` is a good default
+- `NUM_WORKERS=0` remains the safest starting point when debugging data issues
+- LoRA checkpoints often need the `experiment_cfg` symlink for inference entrypoints
+- dual-GPU inference is the sweet spot for this fork right now
 
 ## License
 
-This project is licensed under the [Apache License 2.0](LICENSE).
-
-## Support
-
-For issues and questions:
-- Check the troubleshooting section above
-- Review server logs for detailed error messages
-- Verify your checkpoint is compatible with this release
-
-[![Star History Chart](https://api.star-history.com/svg?repos=dreamzero0/dreamzero&type=Date)](https://star-history.com/#dreamzero0/dreamzero&Date)
+This repository inherits the upstream DreamZero licensing and repository structure. See [LICENSE](LICENSE).
